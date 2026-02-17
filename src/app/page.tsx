@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { auth } from "@clerk/nextjs/server";
 import { Button } from "@/components/ui/button";
 import {
   Film,
@@ -36,7 +37,10 @@ const STEPS = [
   },
 ] as const;
 
-export default function LandingPage() {
+export default async function LandingPage() {
+  const { userId } = await auth();
+  const isSignedIn = !!userId;
+
   return (
     <div className="flex min-h-screen flex-col">
       {/* Header */}
@@ -48,15 +52,23 @@ export default function LandingPage() {
           </span>
         </div>
         <nav className="flex items-center gap-4">
-          <Link
-            href="/sign-in"
-            className="text-sm text-muted-foreground transition-colors hover:text-foreground"
-          >
-            Sign in
-          </Link>
-          <Button asChild size="sm">
-            <Link href="/sign-up">Get started</Link>
-          </Button>
+          {isSignedIn ? (
+            <Button asChild size="sm">
+              <Link href="/movies">Go to Dashboard</Link>
+            </Button>
+          ) : (
+            <>
+              <Link
+                href="/sign-in"
+                className="text-sm text-muted-foreground transition-colors hover:text-foreground"
+              >
+                Sign in
+              </Link>
+              <Button asChild size="sm">
+                <Link href="/sign-up">Sign up</Link>
+              </Button>
+            </>
+          )}
         </nav>
       </header>
 
@@ -78,15 +90,26 @@ export default function LandingPage() {
             assembles the final cut.
           </p>
           <div className="flex gap-3 pt-2">
-            <Button asChild size="lg">
-              <Link href="/movies">
-                Start creating
-                <ArrowRight className="ml-2 h-4 w-4" />
-              </Link>
-            </Button>
-            <Button asChild variant="outline" size="lg">
-              <Link href="/sign-in">Sign in</Link>
-            </Button>
+            {isSignedIn ? (
+              <Button asChild size="lg">
+                <Link href="/movies">
+                  Go to Dashboard
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </Link>
+              </Button>
+            ) : (
+              <>
+                <Button asChild size="lg">
+                  <Link href="/sign-up">
+                    Sign up free
+                    <ArrowRight className="ml-2 h-4 w-4" />
+                  </Link>
+                </Button>
+                <Button asChild variant="outline" size="lg">
+                  <Link href="/sign-in">Sign in</Link>
+                </Button>
+              </>
+            )}
           </div>
           <p className="text-xs text-muted-foreground">
             50 free credits on signup. No credit card required.
@@ -160,8 +183,8 @@ export default function LandingPage() {
               your first short film before committing to generation.
             </p>
             <Button asChild size="lg">
-              <Link href="/movies">
-                Create your movie
+              <Link href={isSignedIn ? "/movies" : "/sign-up"}>
+                {isSignedIn ? "Go to Dashboard" : "Create your movie"}
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Link>
             </Button>
