@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { Film } from "lucide-react";
-import { UserButton } from "@clerk/nextjs";
+import { Film, LogOut } from "lucide-react";
+import { UserButton, SignedIn, SignedOut, SignOutButton } from "@clerk/nextjs";
+import { Button } from "@/components/ui/button";
 import { CreditsBadge } from "./CreditsBadge";
 
 export function Header() {
@@ -16,14 +17,30 @@ export function Header() {
       </Link>
       <div className="flex items-center gap-3">
         <CreditsBadge balance={50} />
-        <UserButton
-          afterSignOutUrl="/"
-          appearance={{
-            elements: {
-              avatarBox: "h-8 w-8",
-            },
-          }}
-        />
+        <SignedIn>
+          <UserButton
+            afterSignOutUrl="/"
+            appearance={{
+              elements: {
+                avatarBox: "h-8 w-8",
+              },
+            }}
+          />
+          <SignOutButton redirectUrl="/">
+            <Button variant="ghost" size="sm" className="gap-1.5 text-xs text-muted-foreground">
+              <LogOut className="h-3.5 w-3.5" />
+              Sign out
+            </Button>
+          </SignOutButton>
+        </SignedIn>
+        <SignedOut>
+          <Button asChild variant="ghost" size="sm">
+            <Link href="/sign-in">Sign in</Link>
+          </Button>
+          <Button asChild size="sm">
+            <Link href="/sign-up">Sign up</Link>
+          </Button>
+        </SignedOut>
       </div>
     </header>
   );
