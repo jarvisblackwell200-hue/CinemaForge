@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ─── Enums ──────────────────────────────────────────────────────
+
+enum Plan {
+  FREE
+  CREATOR
+  PRO
+  STUDIO
+}
+
+enum MovieStatus {
+  CONCEPT
+  SCRIPTING
+  CHARACTERS
+  STORYBOARDING
+  GENERATING
+  ASSEMBLING
+  COMPLETE
+}
+
+enum ShotStatus {
+  DRAFT
+  QUEUED
+  GENERATING
+  COMPLETE
+  FAILED
+}
+
+enum CreditType {
+  PURCHASE
+  SUBSCRIPTION
+  USAGE
+  BONUS
+  REFUND
+}
+
+// ─── Auth Models (NextAuth) ─────────────────────────────────────
+
+model User {
+  id             String         @id @default(cuid())
+  email          String         @unique
+  emailVerified  DateTime?
+  name           String?
+  image          String?
+  plan           Plan           @default(FREE)
+  creditsBalance Int            @default(50)
+  movies         Movie[]
+  creditLedger   CreditLedger[]
+  accounts       Account[]
+  sessions       Session[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Core Models ────────────────────────────────────────────────
+
+model Movie {
+  id             String      @id @default(cuid())
+  userId         String
+  user           User        @relation(fields: [userId], references: [id])
+  title          String
+  synopsis       String?
+  genre          String?
+  targetDuration Int         @default(60)
+  aspectRatio    String      @default("16:9")
+  status         MovieStatus @default(CONCEPT)
+  styleBible     Json?
+  script         Json?
+  characters     Character[]
+  shots          Shot[]
+  timeline       Timeline?
+  createdAt      DateTime    @default(now())
+  updatedAt      DateTime    @updatedAt
+
+  @@index([userId])
+}
+
+model Character {
+  id                String   @id @default(cuid())
+  movieId           String
+  movie             Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  name              String
+  role              String?
+  visualDescription String   @db.Text
+  referenceImages   String[]
+  voiceProfile      Json?
+  styleBibleEntry   String?  @db.Text
+  klingElementId    String?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([movieId])
+}
+
+model Shot {
+  id              String     @id @default(cuid())
+  movieId         String
+  movie           Movie      @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  sceneIndex      Int
+  order           Int
+  shotType        String
+  cameraMovement  String
+  subject         String     @db.Text
+  action          String     @db.Text
+  environment     String?    @db.Text
+  lighting        String?    @db.Text
+  dialogue        Json?
+  durationSeconds Int        @default(5)
+  generatedPrompt String?    @db.Text
+  negativePrompt  String?    @db.Text
+  startFrameUrl   String?
+  endFrameUrl     String?
+  status          ShotStatus @default(DRAFT)
+  takes           Take[]
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([movieId])
+  @@index([movieId, order])
+}
+
+model Take {
+  id               String   @id @default(cuid())
+  shotId           String
+  shot             Shot     @relation(fields: [shotId], references: [id], onDelete: Cascade)
+  videoUrl         String
+  thumbnailUrl     String?
+  isHero           Boolean  @default(false)
+  klingTaskId      String?
+  generationParams Json?
+  qualityScore     Float?
+  createdAt        DateTime @default(now())
+
+  @@index([shotId])
+}
+
+model Timeline {
+  id             String   @id @default(cuid())
+  movieId        String   @unique
+  movie          Movie    @relation(fields: [movieId], references: [id], onDelete: Cascade)
+  orderedShotIds String[]
+  transitions    Json?
+  audioLayers    Json?
+  exportedUrl    String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+model CreditLedger {
+  id        String     @id @default(cuid())
+  userId    String
+  user      User       @relation(fields: [userId], references: [id])
+  amount    Int
+  type      CreditType
+  movieId   String?
+  shotId    String?
+  memo      String?
+  createdAt DateTime   @default(now())
+
+  @@index([userId])
+  @@index([userId, createdAt])
+}
