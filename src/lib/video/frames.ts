@@ -1,6 +1,28 @@
 /**
  * Video frame extraction utilities for continuity chaining.
  *
+ * ## Current approach (A + B combined):
+ * - Character reference images generated in CharacterWizard via Flux
+ * - Shot 1 uses character ref as start_image_url (image-to-video)
+ * - Shot N uses last frame of shot N-1 as start_image_url
+ *
+ * ## Future enhancement — Option C: Scene Style Frames
+ * Before generating any video, generate one still image per scene that
+ * establishes the environment, lighting, and color grade. The user
+ * approves each style frame, then every shot in that scene uses it as
+ * a visual anchor. This adds a "Style Frames" step between Storyboard
+ * and Generate in the workflow pipeline:
+ *
+ *   Storyboard → [Style Frames] → Generate
+ *
+ * Implementation would involve:
+ * - A StyleFrameEditor component showing one image per scene
+ * - Generating via Flux with scene environment + lighting + style bible
+ * - Storing approved frames on the Movie or Scene level
+ * - Using scene style frame as start_image_url when no previous shot exists
+ * - Could also be used to regenerate individual shots while maintaining
+ *   the scene's visual identity even when continuity chain is broken
+ *
  * Continuity chaining: extract the last frame of shot N-1 and use it
  * as the start_image_url for shot N, so Kling carries visual DNA
  * between shots.
