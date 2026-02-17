@@ -4,6 +4,7 @@ import { db } from "@/lib/db";
 import { generateVideo, isDryRunMode } from "@/lib/kling/client";
 import { assemblePrompt, formatNegativePrompt } from "@/lib/kling/prompts";
 import { getCreditCost } from "@/lib/constants/pricing";
+import { extractLastFrame } from "@/lib/video/frames";
 import type { QualityTier } from "@/lib/kling/types";
 import type { StyleBible } from "@/types/movie";
 
@@ -166,7 +167,7 @@ async function handleSingleShot(
     }),
   ]);
 
-  // Get the previous shot's hero take for continuity chaining
+  // Continuity chaining: use previous shot's last frame as start image
   let startImageUrl: string | undefined;
   if (shot.order > 0) {
     const prevShot = await db.shot.findFirst({
@@ -175,7 +176,8 @@ async function handleSingleShot(
         order: shot.order - 1,
         status: "COMPLETE",
       },
-      include: {
+      select: {
+        endFrameUrl: true,
         takes: {
           where: { isHero: true },
           select: { videoUrl: true },
@@ -183,10 +185,38 @@ async function handleSingleShot(
         },
       },
     });
-    // In the future, extract last frame from the hero take
-    // For now, continuity chaining is a placeholder
-    if (prevShot?.takes?.[0]?.videoUrl) {
-      // TODO: extract last frame and use as startImageUrl
+
+    // Prefer stored end frame URL, otherwise extract from hero take
+    if (prevShot?.endFrameUrl) {
+      startImageUrl = prevShot.endFrameUrl;
+    } else if (prevShot?.takes?.[0]?.videoUrl) {
+      const frameUrl = await extractLastFrame(prevShot.takes[0].videoUrl);
+      if (frameUrl) {
+        startImageUrl = frameUrl;
+        // Cache it on the shot for future use
+        await db.shot.updateMany({
+          where: {
+            movieId: shot.movieId,
+            order: shot.order - 1,
+          },
+          data: { endFrameUrl: frameUrl },
+        });
+      }
+    }
+  }
+
+  // Also check if the first shot has a character reference image to use
+  if (!startImageUrl && shot.order === 0 && characters.length > 0) {
+    // Find first character with a reference image
+    const charWithRef = await db.character.findFirst({
+      where: {
+        movieId: shot.movie.id,
+        referenceImages: { isEmpty: false },
+      },
+      select: { referenceImages: true },
+    });
+    if (charWithRef?.referenceImages?.[0]) {
+      startImageUrl = charWithRef.referenceImages[0];
     }
   }
 
@@ -219,10 +249,16 @@ async function handleSingleShot(
       },
     });
 
-    // Mark shot as complete
+    // Extract end frame for continuity chaining to the next shot
+    const endFrameUrl = await extractLastFrame(result.videoUrl);
+
+    // Mark shot as complete and cache the end frame
     await db.shot.update({
       where: { id: shot.id },
-      data: { status: "COMPLETE" },
+      data: {
+        status: "COMPLETE",
+        endFrameUrl: endFrameUrl ?? undefined,
+      },
     });
 
     return NextResponse.json({
@@ -232,6 +268,7 @@ async function handleSingleShot(
         creditCost,
         isDryRun: result.isDryRun,
         generationTimeMs: result.durationMs,
+        continuityChained: !!startImageUrl,
       },
     });
   } catch (error) {
