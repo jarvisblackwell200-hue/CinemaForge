@@ -49,13 +49,13 @@ export default function LandingPage() {
         </div>
         <nav className="flex items-center gap-4">
           <Link
-            href="/login"
+            href="/sign-in"
             className="text-sm text-muted-foreground transition-colors hover:text-foreground"
           >
             Sign in
           </Link>
           <Button asChild size="sm">
-            <Link href="/signup">Get started</Link>
+            <Link href="/sign-up">Get started</Link>
           </Button>
         </nav>
       </header>
@@ -79,13 +79,13 @@ export default function LandingPage() {
           </p>
           <div className="flex gap-3 pt-2">
             <Button asChild size="lg">
-              <Link href="/signup">
+              <Link href="/movies">
                 Start creating
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Link>
             </Button>
             <Button asChild variant="outline" size="lg">
-              <Link href="/login">Sign in</Link>
+              <Link href="/sign-in">Sign in</Link>
             </Button>
           </div>
           <p className="text-xs text-muted-foreground">
@@ -160,7 +160,7 @@ export default function LandingPage() {
               your first short film before committing to generation.
             </p>
             <Button asChild size="lg">
-              <Link href="/signup">
+              <Link href="/movies">
                 Create your movie
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Link>

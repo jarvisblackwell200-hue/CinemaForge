@@ -1,6 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { db } from "@/lib/db";
+import { ensureUser } from "@/lib/auth";
 
 const CreateShotSchema = z.object({
   movieId: z.string(),
@@ -10,8 +11,8 @@ const CreateShotSchema = z.object({
   cameraMovement: z.string().min(1),
   subject: z.string().min(1),
   action: z.string().min(1),
-  environment: z.string().optional(),
-  lighting: z.string().optional(),
+  environment: z.string().nullish(),
+  lighting: z.string().nullish(),
   dialogue: z
     .object({
       characterId: z.string(),
@@ -19,10 +20,11 @@ const CreateShotSchema = z.object({
       line: z.string(),
       emotion: z.string(),
     })
-    .optional(),
+    .nullish(),
   durationSeconds: z.number().int().min(3).max(15).optional(),
-  generatedPrompt: z.string().optional(),
-  negativePrompt: z.string().optional(),
+  generatedPrompt: z.string().nullish(),
+  negativePrompt: z.string().nullish(),
+  status: z.string().optional(),
 });
 
 const BulkCreateSchema = z.object({
@@ -30,15 +32,9 @@ const BulkCreateSchema = z.object({
   shots: z.array(CreateShotSchema.omit({ movieId: true })),
 });
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const body = await req.json();
 
@@ -132,17 +128,11 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
-    const movieId = req.nextUrl.searchParams.get("movieId");
+    const movieId = new URL(req.url).searchParams.get("movieId");
     if (!movieId) {
       return NextResponse.json(
         { success: false, error: "movieId is required" },

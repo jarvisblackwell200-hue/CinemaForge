@@ -239,10 +239,7 @@ export default function MovieConceptPage() {
     try {
       const res = await fetch(`/api/movies/${params.movieId}`, {
         method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-          "x-user-id": "dev-user", // TODO: real auth
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           synopsis: latestAnalysis.synopsis,
           genre: latestAnalysis.genre,

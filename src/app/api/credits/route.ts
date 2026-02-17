@@ -1,19 +1,14 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { getBalance, getCreditHistory, estimateMovieCost } from "@/lib/credits";
+import { ensureUser } from "@/lib/auth";
 
 // ─── GET: Balance, history, or movie cost estimate ─────────────
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
-    const action = req.nextUrl.searchParams.get("action") ?? "balance";
+    const action = new URL(req.url).searchParams.get("action") ?? "balance";
 
     // Get current balance
     if (action === "balance") {
@@ -23,15 +18,16 @@ export async function GET(req: NextRequest) {
 
     // Get credit history
     if (action === "history") {
-      const limit = Number(req.nextUrl.searchParams.get("limit") ?? "50");
+      const limit = Number(new URL(req.url).searchParams.get("limit") ?? "50");
       const history = await getCreditHistory(userId, limit);
       return NextResponse.json({ success: true, data: history });
     }
 
     // Estimate cost for a movie
     if (action === "estimate") {
-      const movieId = req.nextUrl.searchParams.get("movieId");
-      const quality = req.nextUrl.searchParams.get("quality") ?? "draft";
+      const url = new URL(req.url);
+      const movieId = url.searchParams.get("movieId");
+      const quality = url.searchParams.get("quality") ?? "draft";
 
       if (!movieId) {
         return NextResponse.json(

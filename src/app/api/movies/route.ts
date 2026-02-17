@@ -1,6 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { db } from "@/lib/db";
+import { ensureUser } from "@/lib/auth";
 
 const CreateMovieSchema = z.object({
   title: z.string().min(1, "Title is required").max(200),
@@ -9,16 +10,9 @@ const CreateMovieSchema = z.object({
   aspectRatio: z.enum(["16:9", "9:16", "1:1", "21:9"]).optional(),
 });
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    // TODO: Replace with real auth session
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const body = await req.json();
     const parsed = CreateMovieSchema.safeParse(body);
@@ -60,15 +54,9 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET(req: NextRequest) {
+export async function GET() {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const movies = await db.movie.findMany({
       where: { userId },

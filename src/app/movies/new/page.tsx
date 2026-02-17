@@ -37,10 +37,7 @@ export default function NewMoviePage() {
     try {
       const res = await fetch("/api/movies", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-user-id": "dev-user", // TODO: real auth
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           title: title.trim(),
           genre: genre === "custom" ? null : genre,

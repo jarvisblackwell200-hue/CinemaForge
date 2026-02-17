@@ -344,10 +344,7 @@ export function CharacterWizard({
     try {
       const res = await fetch("/api/ai/generate-image", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-user-id": "dev-user",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: `Portrait of ${fields.name}: ${visualDescription}`,
           style: "cinematic",
@@ -386,10 +383,7 @@ export function CharacterWizard({
 
       const response = await fetch("/api/characters", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-user-id": "dev-user",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           movieId,
           name: fields.name.trim(),

@@ -1,6 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { db } from "@/lib/db";
+import { ensureUser } from "@/lib/auth";
 
 // ─── Set hero take ─────────────────────────────────────────────
 
@@ -9,15 +10,9 @@ const SetHeroSchema = z.object({
   shotId: z.string(),
 });
 
-export async function PATCH(req: NextRequest) {
+export async function PATCH(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const body = await req.json();
     const parsed = SetHeroSchema.safeParse(body);
@@ -71,17 +66,11 @@ export async function PATCH(req: NextRequest) {
 
 // ─── Get takes for a shot ──────────────────────────────────────
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
-    const shotId = req.nextUrl.searchParams.get("shotId");
+    const shotId = new URL(req.url).searchParams.get("shotId");
     if (!shotId) {
       return NextResponse.json(
         { success: false, error: "shotId required" },
@@ -119,17 +108,11 @@ export async function GET(req: NextRequest) {
 
 // ─── Delete a take ─────────────────────────────────────────────
 
-export async function DELETE(req: NextRequest) {
+export async function DELETE(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
-    const takeId = req.nextUrl.searchParams.get("takeId");
+    const takeId = new URL(req.url).searchParams.get("takeId");
     if (!takeId) {
       return NextResponse.json(
         { success: false, error: "takeId required" },

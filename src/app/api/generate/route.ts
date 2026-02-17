@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { db } from "@/lib/db";
+import { ensureUser } from "@/lib/auth";
 import { generateVideo, isDryRunMode } from "@/lib/kling/client";
 import { assemblePrompt, formatNegativePrompt } from "@/lib/kling/prompts";
 import { getCreditCost } from "@/lib/constants/pricing";
@@ -27,13 +28,7 @@ const GenerateAllSchema = z.object({
 
 export async function POST(req: NextRequest) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const body = await req.json();
 
@@ -383,13 +378,7 @@ async function handleBatch(
 // ─── GET: Check generation status ──────────────────────────────
 
 export async function GET(req: NextRequest) {
-  const userId = req.headers.get("x-user-id");
-  if (!userId) {
-    return NextResponse.json(
-      { success: false, error: "Unauthorized" },
-      { status: 401 }
-    );
-  }
+  const userId = await ensureUser();
 
   const movieId = req.nextUrl.searchParams.get("movieId");
   if (!movieId) {

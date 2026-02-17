@@ -98,8 +98,7 @@ export default function GeneratePage() {
   const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch(
-        `/api/generate?movieId=${params.movieId}`,
-        { headers: { "x-user-id": "dev-user" } }
+        `/api/generate?movieId=${params.movieId}`
       );
       const data = await res.json();
       if (data.success) {
@@ -134,10 +133,7 @@ export default function GeneratePage() {
     try {
       const res = await fetch("/api/generate", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-user-id": "dev-user",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ shotId, quality, generateAudio: false }),
       });
       const data = await res.json();

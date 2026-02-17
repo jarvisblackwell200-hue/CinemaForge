@@ -1,7 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { type Prisma } from "@/generated/prisma/client";
 import { db } from "@/lib/db";
+import { ensureUser } from "@/lib/auth";
 
 const UpdateMovieSchema = z.object({
   title: z.string().min(1).max(200).optional(),
@@ -25,18 +26,12 @@ const UpdateMovieSchema = z.object({
 });
 
 export async function GET(
-  _req: NextRequest,
+  _req: Request,
   { params }: { params: Promise<{ movieId: string }> }
 ) {
   try {
     const { movieId } = await params;
-    const userId = _req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const movie = await db.movie.findFirst({
       where: { id: movieId, userId },
@@ -87,18 +82,12 @@ export async function GET(
 }
 
 export async function PATCH(
-  req: NextRequest,
+  req: Request,
   { params }: { params: Promise<{ movieId: string }> }
 ) {
   try {
     const { movieId } = await params;
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const existing = await db.movie.findFirst({
       where: { id: movieId, userId },
@@ -149,18 +138,12 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  req: NextRequest,
+  _req: Request,
   { params }: { params: Promise<{ movieId: string }> }
 ) {
   try {
     const { movieId } = await params;
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const existing = await db.movie.findFirst({
       where: { id: movieId, userId },

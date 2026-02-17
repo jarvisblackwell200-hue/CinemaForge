@@ -1,6 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { fal } from "@fal-ai/client";
+import { ensureUser } from "@/lib/auth";
 
 const DRY_RUN = process.env.KLING_DRY_RUN !== "false";
 
@@ -13,15 +14,9 @@ const RequestSchema = z.object({
   aspectRatio: z.enum(["portrait_4_3", "landscape_4_3", "square_hd"]).default("portrait_4_3"),
 });
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    await ensureUser();
 
     const body = await req.json();
     const parsed = RequestSchema.safeParse(body);

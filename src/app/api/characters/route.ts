@@ -1,6 +1,7 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { db } from "@/lib/db";
+import { ensureUser } from "@/lib/auth";
 
 const CreateCharacterSchema = z.object({
   movieId: z.string(),
@@ -21,15 +22,9 @@ const CreateCharacterSchema = z.object({
   styleBibleEntry: z.string().optional(),
 });
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
     const body = await req.json();
     const parsed = CreateCharacterSchema.safeParse(body);
@@ -79,17 +74,11 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) {
-      return NextResponse.json(
-        { success: false, error: "Unauthorized" },
-        { status: 401 }
-      );
-    }
+    const userId = await ensureUser();
 
-    const movieId = req.nextUrl.searchParams.get("movieId");
+    const movieId = new URL(req.url).searchParams.get("movieId");
     if (!movieId) {
       return NextResponse.json(
         { success: false, error: "movieId is required" },
