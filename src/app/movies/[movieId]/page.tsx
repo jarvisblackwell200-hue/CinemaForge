@@ -54,19 +54,21 @@ function stripJsonBlock(text: string): string {
   return text.replace(/```json\s*[\s\S]*?\s*```/g, "").trim();
 }
 
+// ─── Constants ──────────────────────────────────────────────────
+
+const WELCOME_MESSAGE: Message = {
+  id: "welcome",
+  role: "assistant",
+  content:
+    "I'm your AI Director. Tell me about the movie you want to create — describe the story, mood, setting, or even just a rough idea. I'll help you turn it into a structured production plan.\n\nFor example: \"A 60-second noir detective story set in a rainy city at night. A detective finds a mysterious note in an alley and follows the clues to an abandoned warehouse.\"",
+};
+
 // ─── Component ──────────────────────────────────────────────────
 
 export default function MovieConceptPage() {
   const params = useParams<{ movieId: string }>();
   const router = useRouter();
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content:
-        "I'm your AI Director. Tell me about the movie you want to create — describe the story, mood, setting, or even just a rough idea. I'll help you turn it into a structured production plan.\n\nFor example: \"A 60-second noir detective story set in a rainy city at night. A detective finds a mysterious note in an alley and follows the clues to an abandoned warehouse.\"",
-    },
-  ]);
+  const [messages, setMessages] = useState<Message[]>([WELCOME_MESSAGE]);
   const [input, setInput] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [accepted, setAccepted] = useState<AcceptedState>({
@@ -76,12 +78,62 @@ export default function MovieConceptPage() {
     style: false,
   });
   const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [chatLoaded, setChatLoaded] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // ─── Load persisted chat on mount ─────────────────────────────
+
+  useEffect(() => {
+    async function loadMovie() {
+      try {
+        const res = await fetch(`/api/movies/${params.movieId}`);
+        if (!res.ok) return;
+        const { data } = await res.json();
+
+        // Restore chat messages if they exist
+        if (data.conceptChat && Array.isArray(data.conceptChat) && data.conceptChat.length > 0) {
+          setMessages([WELCOME_MESSAGE, ...(data.conceptChat as Message[])]);
+        }
+
+        // If the movie already has a script saved, mark all as accepted
+        if (data.script) {
+          setAccepted({ synopsis: true, characters: true, scenes: true, style: true });
+        }
+      } catch {
+        // Non-critical — proceed with empty chat
+      } finally {
+        setChatLoaded(true);
+      }
+    }
+    loadMovie();
+  }, [params.movieId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // ─── Persist chat to DB ────────────────────────────────────────
+
+  const persistChat = useCallback(
+    async (msgs: Message[]) => {
+      // Strip welcome message and transient fields before saving
+      const toSave = msgs
+        .filter((m) => m.id !== "welcome")
+        .map(({ isStreaming: _, ...rest }) => rest);
+      try {
+        await fetch(`/api/movies/${params.movieId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conceptChat: toSave }),
+        });
+      } catch {
+        // Non-critical — chat will just not persist on this round
+      }
+    },
+    [params.movieId]
+  );
 
   const latestAnalysis = [...messages]
     .reverse()
@@ -193,8 +245,8 @@ export default function MovieConceptPage() {
 
       // Parse analysis from the complete response
       const analysis = parseAnalysisFromText(fullText);
-      setMessages((prev) =>
-        prev.map((m) =>
+      setMessages((prev) => {
+        const updated = prev.map((m) =>
           m.id === assistantId
             ? {
                 ...m,
@@ -203,16 +255,18 @@ export default function MovieConceptPage() {
                 isStreaming: false,
               }
             : m
-        )
-      );
+        );
+        persistChat(updated);
+        return updated;
+      });
     } catch (error) {
       if ((error as Error).name === "AbortError") return;
 
       const errorMsg =
         error instanceof Error ? error.message : "Something went wrong";
 
-      setMessages((prev) =>
-        prev.map((m) =>
+      setMessages((prev) => {
+        const updated = prev.map((m) =>
           m.id === assistantId
             ? {
                 ...m,
@@ -222,39 +276,103 @@ export default function MovieConceptPage() {
                 isStreaming: false,
               }
             : m
-        )
-      );
+        );
+        persistChat(updated);
+        return updated;
+      });
     } finally {
       setIsStreaming(false);
       abortRef.current = null;
     }
-  }, [input, isStreaming, messages, params.movieId]);
+  }, [input, isStreaming, messages, params.movieId, persistChat]);
 
   // ─── Accept & save to movie ─────────────────────────────────
 
   async function handleAcceptAll() {
-    if (!latestAnalysis || isSaving) return;
+    if (isSaving) return;
+
+    // If script was already saved (returning user), just navigate
+    if (!latestAnalysis) {
+      router.push(`/movies/${params.movieId}/script`);
+      return;
+    }
+
+    if (!latestAnalysis.scenes || latestAnalysis.scenes.length === 0) {
+      setSaveError("No scenes in the analysis. Ask the AI Director to generate a full script with scenes.");
+      return;
+    }
+
     setIsSaving(true);
+    setSaveError(null);
 
     try {
+      // Include conceptChat in the same save to avoid race with persistChat
+      const chatToSave = messages
+        .filter((m) => m.id !== "welcome")
+        .map(({ isStreaming: _, ...rest }) => rest);
+
+      const payload: Record<string, unknown> = {
+        synopsis: latestAnalysis.synopsis,
+        genre: latestAnalysis.genre,
+        script: { scenes: latestAnalysis.scenes },
+        styleBible: latestAnalysis.styleSuggestions,
+        conceptChat: chatToSave,
+        status: "SCRIPTING",
+      };
+
+      // Only include targetDuration if it's a valid integer in range
+      const dur = latestAnalysis.suggestedDuration;
+      if (typeof dur === "number" && dur >= 30 && dur <= 180) {
+        payload.targetDuration = Math.round(dur);
+      }
+
       const res = await fetch(`/api/movies/${params.movieId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          synopsis: latestAnalysis.synopsis,
-          genre: latestAnalysis.genre,
-          script: { scenes: latestAnalysis.scenes },
-          styleBible: latestAnalysis.styleSuggestions,
-          targetDuration: latestAnalysis.suggestedDuration,
-          status: "SCRIPTING",
-        }),
+        body: JSON.stringify(payload),
       });
 
-      if (res.ok) {
-        router.push(`/movies/${params.movieId}/script`);
+      if (!res.ok) {
+        const errBody = await res.text();
+        const errMsg = `Save failed (${res.status}): ${errBody}`;
+        console.error(errMsg);
+        setSaveError(errMsg);
+        return;
       }
+
+      // Create Character records from AI-suggested characters (skip if characters already exist)
+      if (latestAnalysis.characters.length > 0) {
+        const existingRes = await fetch(
+          `/api/characters?movieId=${params.movieId}`
+        );
+        const existingData = await existingRes.json();
+        if (
+          existingRes.ok &&
+          existingData.success &&
+          existingData.data.length === 0
+        ) {
+          await Promise.all(
+            latestAnalysis.characters.map((char) =>
+              fetch("/api/characters", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  movieId: params.movieId,
+                  name: char.name,
+                  role: char.role,
+                  visualDescription: char.suggestedVisualDescription,
+                }),
+              })
+            )
+          );
+        }
+      }
+
+      router.push(`/movies/${params.movieId}/script`);
     } catch (error) {
-      console.error("Failed to save concept:", error);
+      const errMsg = error instanceof Error ? error.message : String(error);
+      console.error("Failed to save concept:", errMsg);
+      setSaveError(errMsg);
     } finally {
       setIsSaving(false);
     }
@@ -367,6 +485,11 @@ export default function MovieConceptPage() {
                           Continue to Script
                         </Button>
                       </div>
+                      {saveError && (
+                        <p className="mt-2 text-xs text-destructive break-all">
+                          {saveError}
+                        </p>
+                      )}
                     </Card>
                   )}
                 </div>

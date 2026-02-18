@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { z } from "zod/v4";
-import { type Prisma } from "@/generated/prisma/client";
+import { MovieStatus } from "@/generated/prisma/enums";
 import { db } from "@/lib/db";
 import { ensureUser } from "@/lib/auth";
 
@@ -21,8 +21,9 @@ const UpdateMovieSchema = z.object({
       "COMPLETE",
     ])
     .optional(),
-  styleBible: z.any().optional() as z.ZodOptional<z.ZodType<Prisma.InputJsonValue>>,
-  script: z.any().optional() as z.ZodOptional<z.ZodType<Prisma.InputJsonValue>>,
+  styleBible: z.any().optional(),
+  script: z.any().optional(),
+  conceptChat: z.any().optional(),
 });
 
 export async function GET(
@@ -85,10 +86,16 @@ export async function PATCH(
   req: Request,
   { params }: { params: Promise<{ movieId: string }> }
 ) {
+  let step = "init";
+  let body: Record<string, unknown> = {};
   try {
+    step = "params";
     const { movieId } = await params;
+
+    step = "auth";
     const userId = await ensureUser();
 
+    step = "find";
     const existing = await db.movie.findFirst({
       where: { id: movieId, userId },
       select: { id: true },
@@ -101,7 +108,10 @@ export async function PATCH(
       );
     }
 
-    const body = await req.json();
+    step = "parse-body";
+    body = await req.json();
+
+    step = "validate";
     const parsed = UpdateMovieSchema.safeParse(body);
 
     if (!parsed.success) {
@@ -111,9 +121,17 @@ export async function PATCH(
       );
     }
 
+    step = "build-update";
+    const { status, ...rest } = parsed.data;
+    const updateData = {
+      ...rest,
+      ...(status !== undefined && { status: status as MovieStatus }),
+    };
+
+    step = "db-update";
     const movie = await db.movie.update({
       where: { id: movieId },
-      data: parsed.data,
+      data: updateData,
       select: {
         id: true,
         title: true,
@@ -123,15 +141,20 @@ export async function PATCH(
         targetDuration: true,
         styleBible: true,
         script: true,
+        conceptChat: true,
         updatedAt: true,
       },
     });
 
     return NextResponse.json({ success: true, data: movie });
   } catch (error) {
-    console.error("Failed to update movie:", error);
+    const message = error instanceof Error ? error.message : String(error);
+    const stack = error instanceof Error ? error.stack : undefined;
+    console.error(`[PATCH /movies] FAILED at step="${step}":`, message);
+    if (stack) console.error(stack);
+    console.error("[PATCH /movies] body keys:", Object.keys(body));
     return NextResponse.json(
-      { success: false, error: "Internal server error" },
+      { success: false, error: message, step },
       { status: 500 }
     );
   }
