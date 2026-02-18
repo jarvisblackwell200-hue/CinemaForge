@@ -187,17 +187,14 @@ describe("generateVideo input parameters", () => {
     expect(result.isDryRun).toBe(true);
   });
 
-  it("accepts elements for character consistency", async () => {
+  it("accepts image-to-video with character reference", async () => {
     const result = await runGenerateVideo({
       prompt: "@Detective walks into the room",
       duration: 5,
       quality: "cinema",
-      elements: [
-        { id: "elem-123", name: "Detective" },
-        { id: "elem-456", name: "Witness" },
-      ],
+      startImageUrl: "https://example.com/detective-ref.jpg",
     });
-    expect(result.isDryRun).toBe(true);
+    expect(result.videoUrl).toBeTruthy();
   });
 
   it("accepts full input with all optional parameters", async () => {
@@ -211,7 +208,6 @@ describe("generateVideo input parameters", () => {
       cfgScale: 0.5,
       startImageUrl: "https://example.com/start.jpg",
       endImageUrl: "https://example.com/end.jpg",
-      elements: [{ id: "elem-001", name: "Marcus" }],
     };
     const result = await runGenerateVideo(fullInput);
     expect(result.isDryRun).toBe(true);
