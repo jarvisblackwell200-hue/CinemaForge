@@ -9,8 +9,14 @@ export interface KlingGenerateRequest {
   negative_prompt?: string;
   duration: number;
   aspect_ratio: KlingAspectRatio;
+  /** Native Kling camera presets. Not available via fal.ai — requires direct Kling API. */
   camera_control?: string;
   start_frame_url?: string;
+  /**
+   * Kling Elements API references for character consistency.
+   * Not available via fal.ai — requires direct Kling API integration.
+   * `face_reference_strength` should be 70-85 (Kling default 42 is too low, >85 too rigid).
+   */
   subject_reference?: {
     element_id: string;
     face_reference_strength?: number;

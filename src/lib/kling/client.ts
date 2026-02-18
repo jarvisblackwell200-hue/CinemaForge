@@ -1,20 +1,22 @@
 import { fal } from "@fal-ai/client";
+import sharp from "sharp";
+import { createClient } from "@supabase/supabase-js";
 import type { QualityTier } from "./types";
 
-// ─── Configuration ─────────────────────────────────────────────
-
-const DRY_RUN = process.env.KLING_DRY_RUN !== "false"; // default: dry-run ON
+// ─── Kling O3 endpoints via fal.ai ────────────────────────────
 
 const FAL_ENDPOINTS = {
   textToVideo: {
-    standard: "fal-ai/kling-video/v3/standard/text-to-video",
-    pro: "fal-ai/kling-video/v3/pro/text-to-video",
+    standard: "fal-ai/kling-video/o3/standard/text-to-video",
+    pro: "fal-ai/kling-video/o3/pro/text-to-video",
   },
   imageToVideo: {
-    standard: "fal-ai/kling-video/v3/standard/image-to-video",
-    pro: "fal-ai/kling-video/v3/pro/image-to-video",
+    standard: "fal-ai/kling-video/o3/standard/image-to-video",
+    pro: "fal-ai/kling-video/o3/pro/image-to-video",
   },
 } as const;
+
+const MIN_IMAGE_DIM = 300; // Kling O3 minimum: 300x300
 
 // ─── Types ─────────────────────────────────────────────────────
 
@@ -26,12 +28,10 @@ export interface GenerateVideoInput {
   quality: QualityTier;
   generateAudio?: boolean;
   cfgScale?: number;
-  /** For image-to-video: start frame URL */
+  /** For image-to-video: character reference or start frame */
   startImageUrl?: string;
   /** For continuity chaining: end frame from previous shot */
   endImageUrl?: string;
-  /** Kling Elements for character consistency */
-  elements?: { id: string; name: string }[];
 }
 
 export interface GenerateVideoResult {
@@ -49,37 +49,7 @@ export interface GenerationProgress {
 
 type ProgressCallback = (progress: GenerationProgress) => void;
 
-// ─── Mock for dry-run mode ─────────────────────────────────────
-
-const MOCK_VIDEO_URL =
-  "https://storage.googleapis.com/falserverless/example_outputs/kling-v3/standard-i2v/out.mp4";
-
-async function generateDryRun(
-  input: GenerateVideoInput,
-  onProgress?: ProgressCallback
-): Promise<GenerateVideoResult> {
-  const totalMs = 3000; // simulate 3 second generation
-  const steps = 6;
-  const stepMs = totalMs / steps;
-
-  for (let i = 0; i < steps; i++) {
-    await new Promise((r) => setTimeout(r, stepMs));
-    onProgress?.({
-      status: i < steps - 1 ? "IN_PROGRESS" : "COMPLETED",
-      elapsedMs: (i + 1) * stepMs,
-      logs: [`[dry-run] Step ${i + 1}/${steps}`],
-    });
-  }
-
-  return {
-    videoUrl: MOCK_VIDEO_URL,
-    fileSize: 3_149_129,
-    durationMs: totalMs,
-    isDryRun: true,
-  };
-}
-
-// ─── Real fal.ai generation ────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────
 
 function initFal() {
   const key = process.env.FAL_KEY;
@@ -87,41 +57,129 @@ function initFal() {
   fal.config({ credentials: key });
 }
 
-function getEndpoint(
-  input: GenerateVideoInput
-): string {
-  const tier = input.quality === "cinema" ? "pro" : "standard";
-  if (input.startImageUrl) {
+function getSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error("Supabase not configured");
+  return createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
+
+// Clamp duration to Kling O3 range (3–15), returns string enum
+function clampDuration(seconds: number): string {
+  return String(Math.max(3, Math.min(15, Math.round(seconds))));
+}
+
+/**
+ * Download an image, check dimensions, and upscale if below 300x300.
+ * Returns the original URL if already large enough, or a new Supabase URL of the upscaled version.
+ */
+async function ensureMinImageSize(imageUrl: string): Promise<string> {
+  const res = await fetch(imageUrl);
+  if (!res.ok) {
+    console.warn(`[kling] Failed to fetch image for size check: ${res.status}`);
+    return imageUrl;
+  }
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const metadata = await sharp(buffer).metadata();
+  const w = metadata.width ?? 0;
+  const h = metadata.height ?? 0;
+
+  if (w >= MIN_IMAGE_DIM && h >= MIN_IMAGE_DIM) {
+    return imageUrl; // Already large enough
+  }
+
+  console.log(`[kling] Image too small (${w}x${h}), upscaling to meet ${MIN_IMAGE_DIM}x${MIN_IMAGE_DIM} minimum`);
+
+  // Calculate scale factor to get both dimensions above minimum
+  const scale = Math.max(MIN_IMAGE_DIM / Math.max(w, 1), MIN_IMAGE_DIM / Math.max(h, 1));
+  const newW = Math.ceil(w * scale);
+  const newH = Math.ceil(h * scale);
+
+  const upscaled = await sharp(buffer)
+    .resize(newW, newH, { fit: "fill" })
+    .jpeg({ quality: 90 })
+    .toBuffer();
+
+  // Upload upscaled image to Supabase
+  const supabase = getSupabase();
+  const path = `upscaled/${crypto.randomUUID()}.jpg`;
+  const { error } = await supabase.storage
+    .from("reference-images")
+    .upload(path, upscaled, { contentType: "image/jpeg", upsert: false });
+
+  if (error) {
+    console.error("[kling] Failed to upload upscaled image:", error.message);
+    return imageUrl; // Fall back to original
+  }
+
+  const { data } = supabase.storage.from("reference-images").getPublicUrl(path);
+  console.log(`[kling] Upscaled image: ${w}x${h} → ${newW}x${newH}`);
+  return data.publicUrl;
+}
+
+// TODO: The following fal.ai-unsupported params require direct Kling API integration:
+//   - subject_reference (Elements API / klingElementId / @Element syntax)
+//   - face_reference_strength (Kling default 42, CLAUDE.md recommends 70-85)
+//   - camera_control (Kling native camera presets)
+// These are defined in types.ts for future direct-API work.
+
+function buildFalInput(input: GenerateVideoInput, imageUrl: string | undefined): Record<string, unknown> {
+  const falInput: Record<string, unknown> = {
+    prompt: input.prompt,
+    negative_prompt: input.negativePrompt,
+    duration: clampDuration(input.duration),
+    cfg_scale: input.cfgScale ?? 0.5,
+    generate_audio: input.generateAudio ?? false,
+    aspect_ratio: input.aspectRatio ?? "16:9",
+  };
+
+  if (imageUrl) {
+    // image-to-video mode
+    falInput.image_url = imageUrl;
+    if (input.endImageUrl) {
+      falInput.end_image_url = input.endImageUrl;
+    }
+  }
+
+  return falInput;
+}
+
+function getEndpoint(quality: QualityTier, useImage: boolean): string {
+  const tier = quality === "cinema" ? "pro" : "standard";
+  if (useImage) {
     return FAL_ENDPOINTS.imageToVideo[tier];
   }
   return FAL_ENDPOINTS.textToVideo[tier];
 }
 
-function buildFalInput(input: GenerateVideoInput): Record<string, unknown> {
-  const falInput: Record<string, unknown> = {
-    prompt: input.prompt,
-    duration: String(input.duration),
-    aspect_ratio: input.aspectRatio ?? "16:9",
-    negative_prompt: input.negativePrompt ?? "blur, distort, low quality",
-    cfg_scale: input.cfgScale ?? 0.5,
-    generate_audio: input.generateAudio ?? false,
-  };
+// ─── Core subscribe call ──────────────────────────────────────
 
-  if (input.startImageUrl) {
-    falInput.start_image_url = input.startImageUrl;
-  }
-  if (input.endImageUrl) {
-    falInput.end_image_url = input.endImageUrl;
-  }
-  if (input.elements?.length) {
-    falInput.elements = input.elements.map((el) => ({
-      id: el.id,
-      name: el.name,
-    }));
-  }
-
-  return falInput;
+async function callFal(
+  endpoint: string,
+  falInput: Record<string, unknown>,
+  start: number,
+  onProgress?: ProgressCallback
+): Promise<{ data: { video: { url: string; file_size: number } } }> {
+  const result = await fal.subscribe(endpoint as never, {
+    input: falInput,
+    logs: true,
+    onQueueUpdate: (update: { status: string; logs?: { message: string }[] }) => {
+      const elapsedMs = Date.now() - start;
+      if (update.status === "IN_QUEUE") {
+        onProgress?.({ status: "IN_QUEUE", elapsedMs, logs: [] });
+      } else if (update.status === "IN_PROGRESS") {
+        const logs = (update.logs ?? []).map((log) => log.message);
+        onProgress?.({ status: "IN_PROGRESS", elapsedMs, logs });
+      }
+    },
+  } as never);
+  return result as { data: { video: { url: string; file_size: number } } };
 }
+
+// ─── Generation ───────────────────────────────────────────────
 
 async function generateReal(
   input: GenerateVideoInput,
@@ -129,31 +187,41 @@ async function generateReal(
 ): Promise<GenerateVideoResult> {
   initFal();
 
-  const endpoint = getEndpoint(input);
-  const falInput = buildFalInput(input);
+  // Ensure image meets Kling's minimum dimensions (300x300)
+  let imageUrl: string | undefined;
+  if (input.startImageUrl) {
+    imageUrl = await ensureMinImageSize(input.startImageUrl);
+  }
+
+  const useImage = !!imageUrl;
+  const endpoint = getEndpoint(input.quality, useImage);
+  const falInput = buildFalInput(input, imageUrl);
   const start = Date.now();
 
-  const result = await fal.subscribe(endpoint, {
-    input: falInput,
-    logs: true,
-    onQueueUpdate: (update) => {
-      const elapsedMs = Date.now() - start;
-      if (update.status === "IN_QUEUE") {
-        onProgress?.({ status: "IN_QUEUE", elapsedMs, logs: [] });
-      } else if (update.status === "IN_PROGRESS") {
-        const logs = (update.logs ?? []).map(
-          (log: { message: string }) => log.message
-        );
-        onProgress?.({ status: "IN_PROGRESS", elapsedMs, logs });
-      }
-    },
+  console.log(`[kling] Generating via ${endpoint}`, {
+    duration: falInput.duration,
+    hasImage: useImage,
+    audio: falInput.generate_audio,
+    promptLength: input.prompt.length,
   });
+
+  let result;
+  try {
+    result = await callFal(endpoint, falInput, start, onProgress);
+  } catch (err: unknown) {
+    const falErr = err as { status?: number; body?: unknown; message?: string };
+    console.error(`[kling] fal.ai error:`, {
+      status: falErr.status,
+      body: JSON.stringify(falErr.body, null, 2),
+      message: falErr.message,
+    });
+    throw err;
+  }
 
   const elapsedMs = Date.now() - start;
   onProgress?.({ status: "COMPLETED", elapsedMs, logs: [] });
 
-  const video = (result.data as { video: { url: string; file_size: number } })
-    .video;
+  const video = result.data.video;
 
   return {
     videoUrl: video.url,
@@ -166,23 +234,20 @@ async function generateReal(
 // ─── Public API ────────────────────────────────────────────────
 
 /**
- * Generate a video from a prompt using Kling 3.0 via fal.ai.
- * In dry-run mode (default), returns a mock video URL after a short delay.
- * Set KLING_DRY_RUN=false in .env to use the real API.
+ * Generate a video using Kling O3 via fal.ai.
+ * Standard tier uses o3/standard, cinema tier uses o3/pro.
+ * Automatically upscales small images to meet Kling's 300x300 minimum.
  */
 export async function generateVideo(
   input: GenerateVideoInput,
   onProgress?: ProgressCallback
 ): Promise<GenerateVideoResult> {
-  if (DRY_RUN) {
-    return generateDryRun(input, onProgress);
-  }
   return generateReal(input, onProgress);
 }
 
 /**
- * Check if we're in dry-run mode.
+ * Always live — no dry-run mode.
  */
 export function isDryRunMode(): boolean {
-  return DRY_RUN;
+  return false;
 }

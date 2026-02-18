@@ -17,6 +17,10 @@ interface PromptShot {
   lighting?: string | null;
   dialogue?: ShotDialogue | null;
   durationSeconds: number;
+  /** When false, dialogue formatting is omitted from the assembled prompt.
+   *  This prevents Kling from visually depicting speech when audio generation is off.
+   *  Defaults to true for backward compatibility. */
+  includeDialogue?: boolean;
 }
 
 /**
@@ -48,9 +52,11 @@ export function assemblePrompt(
   // 3. ACTION BLOCK
   if (shot.action) blocks.push(shot.action);
 
-  // 4. DIALOGUE (inline with action)
-  const dialogueBlock = formatDialogue(shot.dialogue ?? null);
-  if (dialogueBlock) blocks.push(dialogueBlock);
+  // 4. DIALOGUE (inline with action) — only when audio generation is enabled
+  if (shot.includeDialogue !== false) {
+    const dialogueBlock = formatDialogue(shot.dialogue ?? null);
+    if (dialogueBlock) blocks.push(dialogueBlock);
+  }
 
   // 5. ENVIRONMENT
   if (shot.environment) blocks.push(shot.environment);
@@ -81,6 +87,10 @@ function buildCameraBlock(shotType: string, cameraMovement: string): string {
  * Builds the subject block with @Element references for Kling.
  * Characters mentioned in the subject get their @Name annotation.
  * Does NOT re-describe what's in reference images.
+ *
+ * NOTE: The @Element injection only works when `klingElementId` is populated,
+ * which requires the Kling Elements API (direct Kling API only, not fal.ai).
+ * When using fal.ai, characters are referenced by visual description only.
  */
 export function buildSubjectBlock(
   subject: string,
@@ -140,6 +150,9 @@ export function formatNegativePrompt(
 /**
  * Assembles multi-shot storyboard prompt for Kling 3.0 storyboard mode.
  * Max 6 shots per generation.
+ *
+ * Reserved for future multi-shot storyboard mode integration.
+ * Currently tested but not called — single-shot generation is used instead.
  */
 export function assembleMultiShotPrompt(
   shots: PromptShot[],

@@ -15,6 +15,7 @@ const GenerateSchema = z.object({
   shotId: z.string(),
   quality: z.enum(["draft", "standard", "cinema"]).default("draft"),
   generateAudio: z.boolean().default(false),
+  characterReferenceImages: z.array(z.string().url()).optional(),
 });
 
 // Also support generating all shots for a movie
@@ -61,7 +62,7 @@ export async function POST(req: NextRequest) {
 
 async function handleSingleShot(
   userId: string,
-  input: { shotId: string; quality: QualityTier; generateAudio: boolean }
+  input: { shotId: string; quality: QualityTier; generateAudio: boolean; characterReferenceImages?: string[] }
 ) {
   // Fetch the shot with its movie and characters
   const shot = await db.shot.findFirst({
@@ -113,33 +114,47 @@ async function handleSingleShot(
     );
   }
 
-  // Assemble the prompt
+  // Build the prompt — prefer user-edited stored prompt when available
   const styleBible = shot.movie.styleBible as StyleBible | null;
-  const promptShot = {
-    shotType: shot.shotType,
-    cameraMovement: shot.cameraMovement,
-    subject: shot.subject,
-    action: shot.action,
-    environment: shot.environment,
-    lighting: shot.lighting,
-    dialogue: shot.dialogue as {
-      characterId: string;
-      characterName: string;
-      line: string;
-      emotion: string;
-    } | null,
-    durationSeconds: shot.durationSeconds,
-  };
+  const hasDialogue = !!(shot.dialogue as { line?: string } | null)?.line;
+  const shouldIncludeDialogue = input.generateAudio && hasDialogue;
 
-  const assembledPrompt = assemblePrompt(promptShot, characters, styleBible);
-  const negativePrompt = formatNegativePrompt(styleBible);
+  // Use stored prompt if it exists AND (no dialogue to strip OR audio is on).
+  // If the shot has dialogue but audio is off, we must re-assemble to exclude
+  // the dialogue formatting that the planner always includes.
+  const useStoredPrompt = !!shot.generatedPrompt && (!hasDialogue || input.generateAudio);
 
-  // Mark shot as generating
+  let finalPrompt: string;
+  if (useStoredPrompt) {
+    finalPrompt = shot.generatedPrompt!;
+  } else {
+    const promptShot = {
+      shotType: shot.shotType,
+      cameraMovement: shot.cameraMovement,
+      subject: shot.subject,
+      action: shot.action,
+      environment: shot.environment,
+      lighting: shot.lighting,
+      dialogue: shot.dialogue as {
+        characterId: string;
+        characterName: string;
+        line: string;
+        emotion: string;
+      } | null,
+      durationSeconds: shot.durationSeconds,
+      includeDialogue: shouldIncludeDialogue,
+    };
+    finalPrompt = assemblePrompt(promptShot, characters, styleBible);
+  }
+
+  const negativePrompt = shot.negativePrompt || formatNegativePrompt(styleBible);
+
+  // Mark shot as generating — always write the final prompt for audit trail
   await db.shot.update({
     where: { id: shot.id },
     data: {
       status: "GENERATING",
-      generatedPrompt: assembledPrompt,
+      generatedPrompt: finalPrompt,
       negativePrompt: negativePrompt,
     },
   });
@@ -200,9 +215,14 @@ async function handleSingleShot(
     }
   }
 
-  // Also check if the first shot has a character reference image to use
-  if (!startImageUrl && shot.order === 0 && characters.length > 0) {
-    // Find first character with a reference image
+  // Use character reference images for image-to-video when no continuity frame
+  // This ensures the character from the uploaded photo appears in the video
+  if (!startImageUrl && input.characterReferenceImages?.length) {
+    startImageUrl = input.characterReferenceImages[0];
+  }
+
+  // Fallback: check DB for any character with reference images
+  if (!startImageUrl) {
     const charWithRef = await db.character.findFirst({
       where: {
         movieId: shot.movie.id,
@@ -218,7 +238,7 @@ async function handleSingleShot(
   // Generate the video
   try {
     const result = await generateVideo({
-      prompt: assembledPrompt,
+      prompt: finalPrompt,
       negativePrompt,
       duration: shot.durationSeconds,
       aspectRatio: (shot.movie.aspectRatio as "16:9" | "9:16" | "1:1") ?? "16:9",
@@ -234,7 +254,7 @@ async function handleSingleShot(
         videoUrl: result.videoUrl,
         isHero: true, // first take is auto-hero
         generationParams: {
-          prompt: assembledPrompt,
+          prompt: finalPrompt,
           negativePrompt,
           quality: input.quality,
           duration: shot.durationSeconds,
@@ -267,7 +287,12 @@ async function handleSingleShot(
       },
     });
   } catch (error) {
-    console.error("Generation failed:", error);
+    const err = error as { status?: number; body?: unknown; message?: string };
+    console.error("Generation failed:", {
+      message: err.message,
+      status: err.status,
+      body: JSON.stringify(err.body, null, 2),
+    });
 
     // Mark shot as failed
     await db.shot.update({
