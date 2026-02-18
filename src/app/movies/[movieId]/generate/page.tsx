@@ -17,6 +17,8 @@ import {
   Eye,
   Pause,
   SkipForward,
+  Volume2,
+  VolumeX,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -76,6 +78,12 @@ interface GenerationSummary {
 
 type GenerationState = "idle" | "confirming" | "generating" | "paused" | "done";
 
+interface CharacterData {
+  id: string;
+  name: string;
+  referenceImages: string[];
+}
+
 // ─── Component ─────────────────────────────────────────────────
 
 export default function GeneratePage() {
@@ -83,28 +91,38 @@ export default function GeneratePage() {
   const router = useRouter();
 
   const [shots, setShots] = useState<ShotData[]>([]);
+  const [characters, setCharacters] = useState<CharacterData[]>([]);
   const [summary, setSummary] = useState<GenerationSummary | null>(null);
   const [isDryRun, setIsDryRun] = useState(true);
   const [loading, setLoading] = useState(true);
   const [quality, setQuality] = useState<QualityTier>("draft");
+  const [generateAudio, setGenerateAudio] = useState(false);
   const [genState, setGenState] = useState<GenerationState>("idle");
   const [currentShotIndex, setCurrentShotIndex] = useState(-1);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [previewShot, setPreviewShot] = useState<ShotData | null>(null);
+  const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
   const pauseRef = useRef(false);
 
   // ─── Fetch shots and status ────────────────────────────────
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(
-        `/api/generate?movieId=${params.movieId}`
-      );
-      const data = await res.json();
+      const [genRes, charsRes] = await Promise.all([
+        fetch(`/api/generate?movieId=${params.movieId}`),
+        fetch(`/api/characters?movieId=${params.movieId}`),
+      ]);
+
+      const data = await genRes.json();
       if (data.success) {
         setShots(data.data.shots);
         setSummary(data.data.summary);
         setIsDryRun(data.data.isDryRun);
+      }
+
+      if (charsRes.ok) {
+        const charsData = await charsRes.json();
+        if (charsData.success) setCharacters(charsData.data);
       }
     } catch (error) {
       console.error("Failed to fetch generation status:", error);
@@ -130,11 +148,30 @@ export default function GeneratePage() {
   // ─── Generate a single shot ────────────────────────────────
 
   async function generateShot(shotId: string): Promise<boolean> {
+    // Prevent double-clicks: skip if already generating this shot
+    if (generatingIds.has(shotId)) return false;
+    setGeneratingIds((prev) => new Set(prev).add(shotId));
+
     try {
+      // Find character reference images for this shot
+      const shot = shots.find((s) => s.id === shotId);
+      const shotText = shot ? `${shot.subject} ${shot.action}`.toLowerCase() : "";
+      const matchedRefs: string[] = [];
+      for (const c of characters) {
+        if (c.referenceImages?.length > 0 && shotText.includes(c.name.toLowerCase())) {
+          matchedRefs.push(...c.referenceImages);
+        }
+      }
+
       const res = await fetch("/api/generate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ shotId, quality, generateAudio: false }),
+        body: JSON.stringify({
+          shotId,
+          quality,
+          generateAudio,
+          characterReferenceImages: matchedRefs.length > 0 ? matchedRefs : undefined,
+        }),
       });
       const data = await res.json();
       if (data.success) {
@@ -172,6 +209,12 @@ export default function GeneratePage() {
     } catch (error) {
       console.error("Generation error:", error);
       return false;
+    } finally {
+      setGeneratingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(shotId);
+        return next;
+      });
     }
   }
 
@@ -335,6 +378,34 @@ export default function GeneratePage() {
               ))}
             </div>
 
+            {/* Audio toggle */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => setGenerateAudio((prev) => !prev)}
+                  disabled={genState === "generating"}
+                  className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
+                    generateAudio
+                      ? "border-primary/50 bg-primary/10 text-primary"
+                      : "border-border/50 bg-background text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  {generateAudio ? (
+                    <Volume2 className="h-3.5 w-3.5" />
+                  ) : (
+                    <VolumeX className="h-3.5 w-3.5" />
+                  )}
+                  Audio {generateAudio ? "On" : "Off"}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent className="text-xs">
+                {generateAudio
+                  ? "Kling will generate audio from dialogue and scene"
+                  : "Video only, no audio generated"}
+              </TooltipContent>
+            </Tooltip>
+
             {/* Cost badge */}
             {pendingShots.length > 0 && (
               <Tooltip>
@@ -424,12 +495,14 @@ export default function GeneratePage() {
               index={index}
               quality={quality}
               isCurrentlyGenerating={
-                genState === "generating" &&
-                pendingShots[currentShotIndex]?.id === shot.id
+                generatingIds.has(shot.id) || (
+                  genState === "generating" &&
+                  pendingShots[currentShotIndex]?.id === shot.id
+                )
               }
               onGenerate={() => generateShot(shot.id)}
               onPreview={() => setPreviewShot(shot)}
-              disabled={genState === "generating"}
+              disabled={genState === "generating" || generatingIds.has(shot.id)}
             />
           ))}
         </div>
