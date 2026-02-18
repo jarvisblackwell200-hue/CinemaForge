@@ -108,6 +108,7 @@ model Movie {
   status         MovieStatus @default(CONCEPT)
   styleBible     Json?
   script         Json?
+  conceptChat    Json?      // persisted AI Director conversation
   characters     Character[]
   shots          Shot[]
   timeline       Timeline?
@@ -150,6 +151,7 @@ model Shot {
   durationSeconds Int        @default(5)
   generatedPrompt String?    @db.Text
   negativePrompt  String?    @db.Text
+  storyboardImageUrl String?
   startFrameUrl   String?
   endFrameUrl     String?
   status          ShotStatus @default(DRAFT)
