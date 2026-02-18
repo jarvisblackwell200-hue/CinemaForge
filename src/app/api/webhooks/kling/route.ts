@@ -1,46 +1,33 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { refundCredits } from "@/lib/credits";
+import type { KieWebhookPayload } from "@/lib/kling/types";
 
 /**
- * Webhook handler for fal.ai generation completion callbacks.
+ * Webhook handler for kie.ai generation completion callbacks.
  *
- * fal.ai can send webhook notifications when a generation job completes.
- * This is an alternative to the polling approach used by fal.subscribe().
+ * kie.ai sends a POST when a video generation task completes or fails.
+ * Include `callBackUrl` in the createTask request to enable this.
  *
- * In the current implementation, we use fal.subscribe() which polls
- * internally, so this webhook is a future-proofing measure for when
- * we move to async job submission with fal.queue.submit().
- *
- * Expected payload from fal.ai:
+ * Expected payload:
  * {
- *   request_id: string,
- *   status: "OK" | "ERROR",
- *   payload: { video: { url, file_size, content_type } } | null,
- *   error: string | null
+ *   code: 200 | 501,
+ *   msg: string,
+ *   data: {
+ *     taskId: string,
+ *     info?: { resultUrls: string[], originUrls?: string[] },
+ *     fallbackFlag: boolean
+ *   }
  * }
  */
 
-interface FalWebhookPayload {
-  request_id: string;
-  status: "OK" | "ERROR";
-  payload: {
-    video: {
-      url: string;
-      file_size: number;
-      content_type: string;
-    };
-  } | null;
-  error: string | null;
-}
-
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json()) as FalWebhookPayload;
+    const body = (await req.json()) as KieWebhookPayload;
 
-    // Find the take by fal request ID (stored as klingTaskId)
+    // Find the take by kie.ai task ID (stored as klingTaskId for schema compat)
     const take = await db.take.findFirst({
-      where: { klingTaskId: body.request_id },
+      where: { klingTaskId: body.data.taskId },
       include: {
         shot: {
           select: {
@@ -54,16 +41,16 @@ export async function POST(req: NextRequest) {
     });
 
     if (!take) {
-      console.warn(`Webhook: no take found for request_id ${body.request_id}`);
+      console.warn(`[kie webhook] No take found for taskId ${body.data.taskId}`);
       return NextResponse.json({ received: true, matched: false });
     }
 
-    if (body.status === "OK" && body.payload?.video) {
+    if (body.code === 200 && body.data.info?.resultUrls?.length) {
       // Success: update the take with the video URL
       await db.take.update({
         where: { id: take.id },
         data: {
-          videoUrl: body.payload.video.url,
+          videoUrl: body.data.info.resultUrls[0],
         },
       });
 
@@ -79,13 +66,12 @@ export async function POST(req: NextRequest) {
         data: { status: "FAILED" },
       });
 
-      // Refund the credits
       const params = take.generationParams as { quality?: string } | null;
       const quality = params?.quality ?? "draft";
       const { getCreditCost } = await import("@/lib/constants/pricing");
       const cost = getCreditCost(
         quality as "draft" | "standard" | "cinema",
-        take.shot.durationSeconds
+        take.shot.durationSeconds,
       );
 
       await refundCredits({
@@ -93,19 +79,18 @@ export async function POST(req: NextRequest) {
         amount: cost,
         movieId: take.shot.movieId,
         shotId: take.shot.id,
-        memo: `Refund: generation failed (webhook) — ${body.error ?? "unknown error"}`,
+        memo: `Refund: generation failed (webhook) — ${body.msg ?? "unknown error"}`,
       });
 
-      // Clean up the failed take
       await db.take.delete({ where: { id: take.id } });
     }
 
     return NextResponse.json({ received: true, matched: true });
   } catch (error) {
-    console.error("Kling webhook error:", error);
+    console.error("[kie webhook] Error:", error);
     return NextResponse.json(
       { received: true, error: "Processing failed" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

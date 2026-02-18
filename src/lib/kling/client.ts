@@ -1,60 +1,62 @@
-import { fal } from "@fal-ai/client";
+/**
+ * Video generation client — uses kie.ai API (Kling 3.0 under the hood).
+ *
+ * Endpoints:
+ *   POST https://api.kie.ai/api/v1/jobs/createTask   — start generation
+ *   GET  https://api.kie.ai/api/v1/jobs/recordInfo    — poll status
+ *
+ * Auth: Bearer token via KIE_API_KEY env var.
+ */
+
 import sharp from "sharp";
 import { createClient } from "@supabase/supabase-js";
-import type { QualityTier } from "./types";
+import type { QualityTier, KieElement, KieCreateTaskRequest, KieCreateTaskResponse, KieRecordInfoResponse, KieTaskResult } from "./types";
+import { qualityToKieMode } from "./types";
 
-// ─── Kling O3 endpoints via fal.ai ────────────────────────────
+// ─── Constants ──────────────────────────────────────────────
 
-const FAL_ENDPOINTS = {
-  textToVideo: {
-    standard: "fal-ai/kling-video/o3/standard/text-to-video",
-    pro: "fal-ai/kling-video/o3/pro/text-to-video",
-  },
-  imageToVideo: {
-    standard: "fal-ai/kling-video/o3/standard/image-to-video",
-    pro: "fal-ai/kling-video/o3/pro/image-to-video",
-  },
-} as const;
+const KIE_BASE = "https://api.kie.ai/api/v1";
+const KIE_UPLOAD_BASE = "https://kieai.redpandaai.co";
+const MIN_IMAGE_DIM = 300;
+const POLL_INTERVAL_MS = 3000;
+const MAX_POLL_TIME_MS = 5 * 60 * 1000; // 5 minutes
 
-const MIN_IMAGE_DIM = 300; // Kling O3 minimum: 300x300
-
-// ─── Types ─────────────────────────────────────────────────────
+// ─── Public types ───────────────────────────────────────────
 
 export interface GenerateVideoInput {
   prompt: string;
-  negativePrompt?: string;
   duration: number; // 3–15 seconds
   aspectRatio?: "16:9" | "9:16" | "1:1";
   quality: QualityTier;
   generateAudio?: boolean;
-  cfgScale?: number;
-  /** For image-to-video: character reference or start frame */
+  /** Start frame image URL (for image-to-video or continuity chaining) */
   startImageUrl?: string;
-  /** For continuity chaining: end frame from previous shot */
+  /** End frame image URL (for continuity chaining) */
   endImageUrl?: string;
+  /** Character elements for face-locking across shots */
+  elements?: KieElement[];
 }
 
 export interface GenerateVideoResult {
   videoUrl: string;
   fileSize: number;
   durationMs: number;
-  isDryRun: boolean;
+  taskId: string;
 }
 
 export interface GenerationProgress {
-  status: "IN_QUEUE" | "IN_PROGRESS" | "COMPLETED";
+  status: "WAITING" | "GENERATING" | "COMPLETED";
   elapsedMs: number;
-  logs: string[];
 }
 
 type ProgressCallback = (progress: GenerationProgress) => void;
 
-// ─── Helpers ──────────────────────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────────
 
-function initFal() {
-  const key = process.env.FAL_KEY;
-  if (!key) throw new Error("FAL_KEY environment variable is not set");
-  fal.config({ credentials: key });
+function getApiKey(): string {
+  const key = process.env.KIE_API_KEY;
+  if (!key) throw new Error("KIE_API_KEY environment variable is not set");
+  return key;
 }
 
 function getSupabase() {
@@ -66,19 +68,20 @@ function getSupabase() {
   });
 }
 
-// Clamp duration to Kling O3 range (3–15), returns string enum
 function clampDuration(seconds: number): string {
   return String(Math.max(3, Math.min(15, Math.round(seconds))));
 }
 
+// ─── Image helpers ──────────────────────────────────────────
+
 /**
  * Download an image, check dimensions, and upscale if below 300x300.
- * Returns the original URL if already large enough, or a new Supabase URL of the upscaled version.
+ * Returns the original URL if already large enough, or a new Supabase URL.
  */
 async function ensureMinImageSize(imageUrl: string): Promise<string> {
   const res = await fetch(imageUrl);
   if (!res.ok) {
-    console.warn(`[kling] Failed to fetch image for size check: ${res.status}`);
+    console.warn(`[kie] Failed to fetch image for size check: ${res.status}`);
     return imageUrl;
   }
 
@@ -88,12 +91,11 @@ async function ensureMinImageSize(imageUrl: string): Promise<string> {
   const h = metadata.height ?? 0;
 
   if (w >= MIN_IMAGE_DIM && h >= MIN_IMAGE_DIM) {
-    return imageUrl; // Already large enough
+    return imageUrl;
   }
 
-  console.log(`[kling] Image too small (${w}x${h}), upscaling to meet ${MIN_IMAGE_DIM}x${MIN_IMAGE_DIM} minimum`);
+  console.log(`[kie] Image too small (${w}x${h}), upscaling to meet ${MIN_IMAGE_DIM}x${MIN_IMAGE_DIM} minimum`);
 
-  // Calculate scale factor to get both dimensions above minimum
   const scale = Math.max(MIN_IMAGE_DIM / Math.max(w, 1), MIN_IMAGE_DIM / Math.max(h, 1));
   const newW = Math.ceil(w * scale);
   const newH = Math.ceil(h * scale);
@@ -103,7 +105,6 @@ async function ensureMinImageSize(imageUrl: string): Promise<string> {
     .jpeg({ quality: 90 })
     .toBuffer();
 
-  // Upload upscaled image to Supabase
   const supabase = getSupabase();
   const path = `upscaled/${crypto.randomUUID()}.jpg`;
   const { error } = await supabase.storage
@@ -111,143 +112,230 @@ async function ensureMinImageSize(imageUrl: string): Promise<string> {
     .upload(path, upscaled, { contentType: "image/jpeg", upsert: false });
 
   if (error) {
-    console.error("[kling] Failed to upload upscaled image:", error.message);
-    return imageUrl; // Fall back to original
+    console.error("[kie] Failed to upload upscaled image:", error.message);
+    return imageUrl;
   }
 
   const { data } = supabase.storage.from("reference-images").getPublicUrl(path);
-  console.log(`[kling] Upscaled image: ${w}x${h} → ${newW}x${newH}`);
+  console.log(`[kie] Upscaled image: ${w}x${h} → ${newW}x${newH}`);
   return data.publicUrl;
 }
 
-// TODO: The following fal.ai-unsupported params require direct Kling API integration:
-//   - subject_reference (Elements API / klingElementId / @Element syntax)
-//   - face_reference_strength (Kling default 42, CLAUDE.md recommends 70-85)
-//   - camera_control (Kling native camera presets)
-// These are defined in types.ts for future direct-API work.
+/**
+ * Upload an image URL to kie.ai's temporary storage for use in elements.
+ * Returns the kie.ai hosted URL.
+ */
+export async function uploadImageToKie(imageUrl: string): Promise<string> {
+  const apiKey = getApiKey();
+  const fileName = `ref-${crypto.randomUUID()}.jpg`;
 
-function buildFalInput(input: GenerateVideoInput, imageUrl: string | undefined): Record<string, unknown> {
-  const falInput: Record<string, unknown> = {
-    prompt: input.prompt,
-    negative_prompt: input.negativePrompt,
-    duration: clampDuration(input.duration),
-    cfg_scale: input.cfgScale ?? 0.5,
-    generate_audio: input.generateAudio ?? false,
-    aspect_ratio: input.aspectRatio ?? "16:9",
-  };
+  const res = await fetch(`${KIE_UPLOAD_BASE}/api/file-url-upload`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      fileUrl: imageUrl,
+      uploadPath: "images",
+      fileName,
+    }),
+  });
 
-  if (imageUrl) {
-    // image-to-video mode
-    falInput.image_url = imageUrl;
-    if (input.endImageUrl) {
-      falInput.end_image_url = input.endImageUrl;
+  if (!res.ok) {
+    console.warn(`[kie] File upload failed (${res.status}), using original URL`);
+    return imageUrl;
+  }
+
+  const json = await res.json();
+  if (json.success && json.data?.fileUrl) {
+    return json.data.fileUrl;
+  }
+
+  console.warn("[kie] File upload response missing fileUrl, using original URL");
+  return imageUrl;
+}
+
+// ─── kie.ai API calls ───────────────────────────────────────
+
+async function createTask(request: KieCreateTaskRequest): Promise<string> {
+  const apiKey = getApiKey();
+
+  const res = await fetch(`${KIE_BASE}/jobs/createTask`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`kie.ai createTask failed (${res.status}): ${text}`);
+  }
+
+  const json = (await res.json()) as KieCreateTaskResponse;
+  if (json.code !== 200 || !json.data?.taskId) {
+    throw new Error(`kie.ai createTask error: ${json.msg}`);
+  }
+
+  return json.data.taskId;
+}
+
+async function pollTask(
+  taskId: string,
+  start: number,
+  onProgress?: ProgressCallback,
+): Promise<KieTaskResult> {
+  const apiKey = getApiKey();
+
+  while (Date.now() - start < MAX_POLL_TIME_MS) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+    const res = await fetch(
+      `${KIE_BASE}/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`,
+      {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      },
+    );
+
+    if (!res.ok) {
+      console.warn(`[kie] Poll failed (${res.status}), retrying...`);
+      continue;
+    }
+
+    const json = (await res.json()) as KieRecordInfoResponse;
+    const state = json.data?.state;
+
+    if (state === "waiting" || state === "queuing") {
+      onProgress?.({ status: "WAITING", elapsedMs: Date.now() - start });
+      continue;
+    }
+
+    if (state === "generating") {
+      onProgress?.({ status: "GENERATING", elapsedMs: Date.now() - start });
+      continue;
+    }
+
+    if (state === "success") {
+      if (!json.data.resultJson) {
+        throw new Error("kie.ai task succeeded but resultJson is empty");
+      }
+      const result = JSON.parse(json.data.resultJson) as KieTaskResult;
+      if (!result.resultUrls?.length) {
+        throw new Error("kie.ai task succeeded but no video URLs in result");
+      }
+      return result;
+    }
+
+    if (state === "fail") {
+      throw new Error(
+        `kie.ai generation failed: ${json.data.failMsg || json.data.failCode || "unknown error"}`,
+      );
     }
   }
 
-  return falInput;
+  throw new Error(`kie.ai generation timed out after ${MAX_POLL_TIME_MS / 1000}s`);
 }
 
-function getEndpoint(quality: QualityTier, useImage: boolean): string {
-  const tier = quality === "cinema" ? "pro" : "standard";
-  if (useImage) {
-    return FAL_ENDPOINTS.imageToVideo[tier];
-  }
-  return FAL_ENDPOINTS.textToVideo[tier];
-}
+// ─── Build request ──────────────────────────────────────────
 
-// ─── Core subscribe call ──────────────────────────────────────
+function buildRequest(input: GenerateVideoInput, imageUrls: string[]): KieCreateTaskRequest {
+  const webhookUrl = process.env.KIE_WEBHOOK_URL;
 
-async function callFal(
-  endpoint: string,
-  falInput: Record<string, unknown>,
-  start: number,
-  onProgress?: ProgressCallback
-): Promise<{ data: { video: { url: string; file_size: number } } }> {
-  const result = await fal.subscribe(endpoint as never, {
-    input: falInput,
-    logs: true,
-    onQueueUpdate: (update: { status: string; logs?: { message: string }[] }) => {
-      const elapsedMs = Date.now() - start;
-      if (update.status === "IN_QUEUE") {
-        onProgress?.({ status: "IN_QUEUE", elapsedMs, logs: [] });
-      } else if (update.status === "IN_PROGRESS") {
-        const logs = (update.logs ?? []).map((log) => log.message);
-        onProgress?.({ status: "IN_PROGRESS", elapsedMs, logs });
-      }
+  const request: KieCreateTaskRequest = {
+    model: "kling-3.0/video",
+    input: {
+      prompt: input.prompt,
+      sound: input.generateAudio ?? false,
+      duration: clampDuration(input.duration),
+      aspect_ratio: input.aspectRatio ?? "16:9",
+      mode: qualityToKieMode(input.quality),
+      multi_shots: false,
     },
-  } as never);
-  return result as { data: { video: { url: string; file_size: number } } };
+  };
+
+  if (webhookUrl) {
+    request.callBackUrl = webhookUrl;
+  }
+
+  if (imageUrls.length > 0) {
+    request.input.image_urls = imageUrls;
+  }
+
+  if (input.elements?.length) {
+    request.input.kling_elements = input.elements;
+  }
+
+  return request;
 }
 
-// ─── Generation ───────────────────────────────────────────────
+// ─── Generation ─────────────────────────────────────────────
 
 async function generateReal(
   input: GenerateVideoInput,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
 ): Promise<GenerateVideoResult> {
-  initFal();
-
-  // Ensure image meets Kling's minimum dimensions (300x300)
-  let imageUrl: string | undefined;
+  // Ensure start/end images meet minimum dimensions
+  const imageUrls: string[] = [];
   if (input.startImageUrl) {
-    imageUrl = await ensureMinImageSize(input.startImageUrl);
+    const url = await ensureMinImageSize(input.startImageUrl);
+    imageUrls.push(url);
+  }
+  if (input.endImageUrl) {
+    const url = await ensureMinImageSize(input.endImageUrl);
+    imageUrls.push(url);
   }
 
-  const useImage = !!imageUrl;
-  const endpoint = getEndpoint(input.quality, useImage);
-  const falInput = buildFalInput(input, imageUrl);
+  const request = buildRequest(input, imageUrls);
   const start = Date.now();
 
-  console.log(`[kling] Generating via ${endpoint}`, {
-    duration: falInput.duration,
-    hasImage: useImage,
-    audio: falInput.generate_audio,
+  console.log(`[kie] Creating task`, {
+    model: request.model,
+    mode: request.input.mode,
+    duration: request.input.duration,
+    hasImages: imageUrls.length > 0,
+    elements: input.elements?.length ?? 0,
+    audio: request.input.sound,
     promptLength: input.prompt.length,
   });
 
-  let result;
+  let taskId: string;
   try {
-    result = await callFal(endpoint, falInput, start, onProgress);
-  } catch (err: unknown) {
-    const falErr = err as { status?: number; body?: unknown; message?: string };
-    console.error(`[kling] fal.ai error:`, {
-      status: falErr.status,
-      body: JSON.stringify(falErr.body, null, 2),
-      message: falErr.message,
-    });
+    taskId = await createTask(request);
+  } catch (err) {
+    console.error(`[kie] createTask error:`, err);
     throw err;
   }
 
-  const elapsedMs = Date.now() - start;
-  onProgress?.({ status: "COMPLETED", elapsedMs, logs: [] });
+  console.log(`[kie] Task created: ${taskId}, polling...`);
 
-  const video = result.data.video;
+  const result = await pollTask(taskId, start, onProgress);
+  const elapsedMs = Date.now() - start;
+
+  onProgress?.({ status: "COMPLETED", elapsedMs });
+
+  console.log(`[kie] Task ${taskId} completed in ${(elapsedMs / 1000).toFixed(1)}s`);
 
   return {
-    videoUrl: video.url,
-    fileSize: video.file_size,
+    videoUrl: result.resultUrls[0],
+    fileSize: 0, // kie.ai doesn't return file size in response
     durationMs: elapsedMs,
-    isDryRun: false,
+    taskId,
   };
 }
 
-// ─── Public API ────────────────────────────────────────────────
+// ─── Public API ─────────────────────────────────────────────
 
 /**
- * Generate a video using Kling O3 via fal.ai.
- * Standard tier uses o3/standard, cinema tier uses o3/pro.
- * Automatically upscales small images to meet Kling's 300x300 minimum.
+ * Generate a video using Kling 3.0 via kie.ai.
+ * Standard mode for draft/standard quality, Pro mode for cinema quality.
+ * Supports character elements for face-locking across shots.
  */
 export async function generateVideo(
   input: GenerateVideoInput,
-  onProgress?: ProgressCallback
+  onProgress?: ProgressCallback,
 ): Promise<GenerateVideoResult> {
   return generateReal(input, onProgress);
-}
-
-/**
- * Always live — no dry-run mode.
- */
-export function isDryRunMode(): boolean {
-  return false;
 }

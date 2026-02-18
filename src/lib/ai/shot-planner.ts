@@ -29,7 +29,7 @@ interface PlannerCharacter {
   role: string | null;
   visualDescription: string;
   referenceImages?: string[];
-  klingElementId?: string | null;
+  hasReferenceImages?: boolean;
 }
 
 // Maps emotional tones to camera movement categories and preferred IDs
@@ -156,7 +156,7 @@ export function planShotsFromScript(
           id: c.id,
           name: c.name,
           visualDescription: c.visualDescription,
-          klingElementId: c.klingElementId,
+          hasReferenceImages: (c.referenceImages?.length ?? 0) > 0,
         })),
         styleBible,
       );

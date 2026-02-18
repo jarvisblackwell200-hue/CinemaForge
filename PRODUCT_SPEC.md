@@ -310,7 +310,7 @@ User
   │     │     ├── reference_images[] (S3 URLs)
   │     │     ├── voice_profile (JSON)
   │     │     ├── style_bible_entry (text)
-  │     │     └── kling_element_id (from Kling API)
+  │     │     └── kling_element_id (legacy field name — elements built from reference_images via kie.ai)
   │     │
   │     ├── Shot[]
   │     │     ├── id, scene_id, order, shot_type, camera_movement
@@ -338,13 +338,12 @@ User
 
 ### API Integrations
 
-**Kling AI API (Primary — via fal.ai or direct):**
-- `POST /text-to-video` — Text prompt → video generation
-- `POST /image-to-video` — Image + prompt → video
-- `POST /elements` — Upload/manage character elements
-- `POST /storyboard` — Multi-shot generation (up to 6 cuts)
-- `GET /task/{id}` — Poll generation status
-- Key parameters: `model` (kling-v3), `mode` (standard|professional), `duration`, `aspect_ratio`, `camera_control`, `subject_reference`
+**kie.ai API (Primary — Kling 3.0 via kie.ai proxy):**
+- `POST /jobs/createTask` — Create video generation task (text-to-video or image-to-video)
+- `GET /jobs/recordInfo?taskId=` — Poll generation status
+- `POST /file-url-upload` — Upload reference images to kie.ai temp storage
+- Webhook callback support via `callBackUrl` parameter
+- Key parameters: `model` (kling-3.0/video), `mode` (std|pro), `duration`, `aspect_ratio`, `kling_elements`, `sound`
 
 **Image Generation (for reference images):**
 - Kling Image 3.0 API or Midjourney API (via third-party) or DALL-E / Flux
@@ -364,7 +363,7 @@ User
 2. For each shot:
    a. Compose prompt from template blocks + style bible + character refs
    b. If shot has predecessor: extract last frame as start_frame
-   c. Submit to Kling API (standard or multi-shot mode)
+   c. Submit to kie.ai API (standard or multi-shot mode)
    d. Poll for completion (webhook or polling)
    e. On success: store video, generate thumbnail, notify user
    f. On failure: auto-retry up to 3x with slight prompt variation
@@ -564,7 +563,7 @@ Camera bias: Handheld following, static observational, interview framing
 
 ## 10. Open Questions
 
-1. **Kling API access model** — Direct API vs. fal.ai proxy vs. other third-party? Pricing implications?
+1. ~~**Kling API access model**~~ — Resolved: Using kie.ai as pay-as-you-go proxy for Kling 3.0.
 2. **Video assembly** — Server-side FFmpeg pipeline vs. client-side? Latency vs. cost tradeoff.
 3. **Image generation for references** — Should we build our own image gen or use Kling Image 3.0 exclusively?
 4. **Competitor positioning** — How do we differentiate from Artlist Max, Runway Stories, and Pika Scenes?

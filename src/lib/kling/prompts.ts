@@ -5,7 +5,8 @@ interface PromptCharacter {
   id: string;
   name: string;
   visualDescription: string;
-  klingElementId?: string | null;
+  /** Whether this character has reference images uploaded for element-based generation */
+  hasReferenceImages?: boolean;
 }
 
 interface PromptShot {
@@ -24,9 +25,10 @@ interface PromptShot {
 }
 
 /**
- * Assembles a complete Kling prompt from structured shot data.
+ * Assembles a complete video generation prompt from structured shot data.
+ * Used with kie.ai's Kling 3.0 model.
  *
- * Order is critical for Kling 3.0 quality:
+ * Order is critical for quality:
  * 1. Camera/Shot type → HOW the audience sees it
  * 2. Subject → WHO is on screen (with @Element references)
  * 3. Action → WHAT happens (beginning → middle → end)
@@ -88,9 +90,9 @@ function buildCameraBlock(shotType: string, cameraMovement: string): string {
  * Characters mentioned in the subject get their @Name annotation.
  * Does NOT re-describe what's in reference images.
  *
- * NOTE: The @Element injection only works when `klingElementId` is populated,
- * which requires the Kling Elements API (direct Kling API only, not fal.ai).
- * When using fal.ai, characters are referenced by visual description only.
+ * NOTE: The @Element injection works when character elements are passed to kie.ai.
+ * The element name in the prompt must match the `name` field of the element
+ * in the kling_elements array sent with the generation request.
  */
 export function buildSubjectBlock(
   subject: string,
@@ -99,12 +101,13 @@ export function buildSubjectBlock(
   let result = subject;
 
   for (const char of characters) {
-    // If the character is mentioned by name, add @Element reference
+    // If the character is mentioned by name, add @element_ reference for kie.ai elements
     const namePattern = new RegExp(`\\b${escapeRegex(char.name)}\\b`, "gi");
-    if (namePattern.test(result) && char.klingElementId) {
+    if (namePattern.test(result) && char.hasReferenceImages) {
+      const elementName = `element_${char.name.toLowerCase().replace(/\s+/g, "_")}`;
       result = result.replace(
         namePattern,
-        `@${char.name}`
+        `@${elementName}`
       );
     }
   }
@@ -113,7 +116,7 @@ export function buildSubjectBlock(
 }
 
 /**
- * Formats dialogue for Kling 3.0 native audio.
+ * Formats dialogue for native audio generation.
  * Format: [Character Name, voice description]: "Line"
  */
 export function formatDialogue(dialogue: ShotDialogue | null): string {
@@ -148,7 +151,7 @@ export function formatNegativePrompt(
 }
 
 /**
- * Assembles multi-shot storyboard prompt for Kling 3.0 storyboard mode.
+ * Assembles multi-shot storyboard prompt for kie.ai multi-shot mode.
  * Max 6 shots per generation.
  *
  * Reserved for future multi-shot storyboard mode integration.

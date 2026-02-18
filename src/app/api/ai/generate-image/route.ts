@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { z } from "zod/v4";
-import { fal } from "@fal-ai/client";
 import { ensureUser } from "@/lib/auth";
 
 const RequestSchema = z.object({
@@ -14,13 +13,6 @@ const RequestSchema = z.object({
   referenceImageUrl: z.string().url().optional(),
 });
 
-// Map internal aspect ratio names to Nano Banana format
-const ASPECT_RATIO_MAP: Record<string, "4:3" | "3:4" | "16:9" | "1:1"> = {
-  portrait_4_3: "3:4",
-  landscape_4_3: "4:3",
-  square_hd: "1:1",
-};
-
 export async function POST(req: Request) {
   try {
     await ensureUser();
@@ -30,21 +22,19 @@ export async function POST(req: Request) {
     if (!parsed.success) {
       return NextResponse.json(
         { success: false, error: z.prettifyError(parsed.error) },
-        { status: 400 }
+        { status: 400 },
       );
     }
 
-    const { prompt, style, aspectRatio, referenceImageUrl } = parsed.data;
+    const { prompt, style, referenceImageUrl } = parsed.data;
 
-    const falKey = process.env.FAL_KEY;
-    if (!falKey) {
+    const kieKey = process.env.KIE_API_KEY;
+    if (!kieKey) {
       return NextResponse.json(
-        { success: false, error: "FAL_KEY not configured" },
-        { status: 500 }
+        { success: false, error: "KIE_API_KEY not configured" },
+        { status: 500 },
       );
     }
-
-    fal.config({ credentials: falKey });
 
     const styleModifiers: Record<string, string> = {
       photorealistic:
@@ -56,66 +46,93 @@ export async function POST(req: Request) {
     };
 
     const fullPrompt = `${prompt}. ${styleModifiers[style]}`;
-    const nbAspectRatio = ASPECT_RATIO_MAP[aspectRatio] ?? "4:3";
 
-    let imageUrl: string;
-
-    if (referenceImageUrl) {
-      // Nano Banana Edit: takes reference image + prompt to place the
-      // character from the image into the described scene
-      const result = await fal.subscribe("fal-ai/nano-banana/edit", {
-        input: {
-          prompt: `Using the character from the reference image, generate: ${fullPrompt}`,
-          image_urls: [referenceImageUrl],
-          aspect_ratio: nbAspectRatio,
-          num_images: 1,
-          output_format: "jpeg",
-          limit_generations: true,
-        },
-      });
-
-      const images = result.data.images;
-      if (!images?.[0]?.url) {
-        return NextResponse.json(
-          { success: false, error: "No image generated" },
-          { status: 500 }
-        );
-      }
-      imageUrl = images[0].url;
-    } else {
-      // Nano Banana: text-to-image
-      const result = await fal.subscribe("fal-ai/nano-banana", {
+    // Use kie.ai Kling 3.0 to generate a short video, then extract first frame
+    // This gives us a cinematic still consistent with the video generation model
+    const res = await fetch("https://api.kie.ai/api/v1/jobs/createTask", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${kieKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: "kling-3.0/video",
         input: {
           prompt: fullPrompt,
-          aspect_ratio: nbAspectRatio,
-          num_images: 1,
-          output_format: "jpeg",
-          limit_generations: true,
+          sound: false,
+          duration: "3",
+          aspect_ratio: "16:9",
+          mode: "std",
+          multi_shots: false,
+          ...(referenceImageUrl ? { image_urls: [referenceImageUrl] } : {}),
         },
-      });
+      }),
+    });
 
-      const images = result.data.images;
-      if (!images?.[0]?.url) {
-        return NextResponse.json(
-          { success: false, error: "No image generated" },
-          { status: 500 }
-        );
-      }
-      imageUrl = images[0].url;
+    if (!res.ok) {
+      const text = await res.text();
+      console.error("[generate-image] kie.ai error:", text);
+      return NextResponse.json(
+        { success: false, error: "Image generation failed" },
+        { status: 500 },
+      );
     }
 
-    return NextResponse.json({
-      success: true,
-      data: {
-        imageUrl,
-        prompt: fullPrompt,
-      },
-    });
+    const createResult = await res.json();
+    if (createResult.code !== 200 || !createResult.data?.taskId) {
+      return NextResponse.json(
+        { success: false, error: createResult.msg ?? "Failed to create task" },
+        { status: 500 },
+      );
+    }
+
+    // Poll for completion (short video, should be quick)
+    const taskId = createResult.data.taskId;
+    const maxPollMs = 120_000;
+    const start = Date.now();
+
+    while (Date.now() - start < maxPollMs) {
+      await new Promise((r) => setTimeout(r, 3000));
+
+      const pollRes = await fetch(
+        `https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`,
+        { headers: { Authorization: `Bearer ${kieKey}` } },
+      );
+
+      if (!pollRes.ok) continue;
+
+      const pollJson = await pollRes.json();
+      const state = pollJson.data?.state;
+
+      if (state === "success" && pollJson.data.resultJson) {
+        const result = JSON.parse(pollJson.data.resultJson);
+        const videoUrl = result.resultUrls?.[0];
+        if (videoUrl) {
+          // Return video URL — the frontend can use a frame from it as reference
+          return NextResponse.json({
+            success: true,
+            data: { imageUrl: videoUrl, prompt: fullPrompt },
+          });
+        }
+      }
+
+      if (state === "fail") {
+        return NextResponse.json(
+          { success: false, error: pollJson.data.failMsg ?? "Generation failed" },
+          { status: 500 },
+        );
+      }
+    }
+
+    return NextResponse.json(
+      { success: false, error: "Generation timed out" },
+      { status: 504 },
+    );
   } catch (error) {
     console.error("Image generation error:", error);
     return NextResponse.json(
       { success: false, error: "Image generation failed" },
-      { status: 500 }
+      { status: 500 },
     );
   }
 }

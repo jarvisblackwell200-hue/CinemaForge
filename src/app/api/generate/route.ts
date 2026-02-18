@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { db } from "@/lib/db";
 import { ensureUser } from "@/lib/auth";
-import { generateVideo, isDryRunMode } from "@/lib/kling/client";
+import { generateVideo } from "@/lib/kling/client";
+import type { KieElement } from "@/lib/kling/types";
 import { assemblePrompt, formatNegativePrompt } from "@/lib/kling/prompts";
 import { getCreditCost } from "@/lib/constants/pricing";
 import { extractLastFrame } from "@/lib/video/frames";
@@ -93,7 +94,7 @@ async function handleSingleShot(
       id: true,
       name: true,
       visualDescription: true,
-      klingElementId: true,
+      referenceImages: true,
     },
   });
 
@@ -144,7 +145,14 @@ async function handleSingleShot(
       durationSeconds: shot.durationSeconds,
       includeDialogue: shouldIncludeDialogue,
     };
-    finalPrompt = assemblePrompt(promptShot, characters, styleBible);
+    finalPrompt = assemblePrompt(
+      promptShot,
+      characters.map((c) => ({
+        ...c,
+        hasReferenceImages: c.referenceImages.length > 0,
+      })),
+      styleBible,
+    );
   }
 
   const negativePrompt = shot.negativePrompt || formatNegativePrompt(styleBible);
@@ -172,7 +180,7 @@ async function handleSingleShot(
         type: "USAGE",
         movieId: shot.movie.id,
         shotId: shot.id,
-        memo: `Video generation: ${input.quality} ${shot.durationSeconds}s (${isDryRunMode() ? "dry-run" : "live"})`,
+        memo: `Video generation: ${input.quality} ${shot.durationSeconds}s (${"live"})`,
       },
     }),
   ]);
@@ -215,36 +223,41 @@ async function handleSingleShot(
     }
   }
 
-  // Use character reference images for image-to-video when no continuity frame
-  // This ensures the character from the uploaded photo appears in the video
-  if (!startImageUrl && input.characterReferenceImages?.length) {
-    startImageUrl = input.characterReferenceImages[0];
+  // Build character elements for face-locking via kie.ai Elements API
+  // Each character with reference images becomes an element referenced as @name in prompt
+  const elements: KieElement[] = [];
+  const charsWithRefs = await db.character.findMany({
+    where: {
+      movieId: shot.movie.id,
+      referenceImages: { isEmpty: false },
+    },
+    select: { name: true, visualDescription: true, referenceImages: true },
+  });
+  for (const char of charsWithRefs) {
+    if (char.referenceImages.length >= 1) {
+      elements.push({
+        name: `element_${char.name.toLowerCase().replace(/\s+/g, "_")}`,
+        description: char.visualDescription.slice(0, 200),
+        element_input_urls: char.referenceImages.slice(0, 4),
+      });
+    }
   }
 
-  // Fallback: check DB for any character with reference images
-  if (!startImageUrl) {
-    const charWithRef = await db.character.findFirst({
-      where: {
-        movieId: shot.movie.id,
-        referenceImages: { isEmpty: false },
-      },
-      select: { referenceImages: true },
-    });
-    if (charWithRef?.referenceImages?.[0]) {
-      startImageUrl = charWithRef.referenceImages[0];
-    }
+  // Use character reference images passed from frontend as start frame fallback
+  if (!startImageUrl && input.characterReferenceImages?.length) {
+    startImageUrl = input.characterReferenceImages[0];
   }
 
   // Generate the video
   try {
     const result = await generateVideo({
       prompt: finalPrompt,
-      negativePrompt,
       duration: shot.durationSeconds,
       aspectRatio: (shot.movie.aspectRatio as "16:9" | "9:16" | "1:1") ?? "16:9",
       quality: input.quality,
       generateAudio: input.generateAudio,
       startImageUrl,
+      elements: elements.length > 0 ? elements : undefined,
     });
 
     // Create a Take record
@@ -253,13 +266,13 @@ async function handleSingleShot(
         shotId: shot.id,
         videoUrl: result.videoUrl,
         isHero: true, // first take is auto-hero
+        klingTaskId: result.taskId,
         generationParams: {
           prompt: finalPrompt,
-          negativePrompt,
           quality: input.quality,
           duration: shot.durationSeconds,
-          dryRun: result.isDryRun,
           generationTimeMs: result.durationMs,
+          elements: elements.length,
         },
       },
     });
@@ -281,9 +294,9 @@ async function handleSingleShot(
       data: {
         take,
         creditCost,
-        isDryRun: result.isDryRun,
         generationTimeMs: result.durationMs,
         continuityChained: !!startImageUrl,
+        elementsUsed: elements.length,
       },
     });
   } catch (error) {
@@ -395,7 +408,6 @@ async function handleBatch(
         shotId: s.id,
         cost: getCreditCost(input.quality, s.durationSeconds),
       })),
-      isDryRun: isDryRunMode(),
     },
   });
 }
@@ -442,6 +454,6 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     success: true,
-    data: { shots, summary, isDryRun: isDryRunMode() },
+    data: { shots, summary },
   });
 }

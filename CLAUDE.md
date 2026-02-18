@@ -22,7 +22,7 @@ Database:     PostgreSQL via Prisma ORM
 Queue:        BullMQ + Redis (for generation job management)
 Storage:      Cloudflare R2 (S3-compatible) for all media assets
 AI/LLM:      Anthropic Claude API (prompt intelligence, script analysis, suggestions)
-Video Gen:    Kling 3.0 API (via fal.ai SDK or direct Kling API)
+Video Gen:    Kling 3.0 API (kie.ai)
 Auth:         NextAuth.js (email + OAuth)
 Payments:     Stripe (subscriptions + credit packs)
 Deployment:   Vercel (frontend) + Railway/Fly.io (worker processes)
@@ -99,8 +99,8 @@ cinemaforge/
 │   │   ├── stripe.ts             # Stripe helpers
 │   │   ├── credits.ts            # Credit checking, deduction, ledger
 │   │   ├── kling/
-│   │   │   ├── client.ts         # Kling API client wrapper
-│   │   │   ├── types.ts          # Kling API types
+│   │   │   ├── client.ts         # kie.ai video generation client
+│   │   │   ├── types.ts          # kie.ai API types
 │   │   │   ├── prompts.ts        # Prompt assembly engine
 │   │   │   └── elements.ts       # Character element management
 │   │   ├── ai/
@@ -130,7 +130,7 @@ cinemaforge/
 │       ├── shot.ts
 │       └── credits.ts
 ├── workers/
-│   ├── generation-worker.ts      # BullMQ worker: processes Kling jobs
+│   ├── generation-worker.ts      # BullMQ worker: processes video generation jobs
 │   └── assembly-worker.ts        # BullMQ worker: FFmpeg assembly
 └── scripts/
     ├── seed-camera-movements.ts  # Seed camera movement DB
@@ -201,7 +201,7 @@ model Character {
   referenceImages   String[] // S3/R2 URLs
   voiceProfile      Json?    // { language, accent, tone, speed }
   styleBibleEntry   String?  @db.Text // appended to prompts featuring this character
-  klingElementId    String?  // ID from Kling Elements API
+  klingElementId    String?  // Legacy field name — used for kie.ai element tracking
   createdAt         DateTime @default(now())
 }
 
@@ -219,7 +219,7 @@ model Shot {
   lighting        String?    @db.Text
   dialogue        Json?      // { characterId, line, emotion }
   durationSeconds Int        @default(5)
-  generatedPrompt String?    @db.Text  // the assembled Kling prompt
+  generatedPrompt String?    @db.Text  // the assembled video generation prompt
   negativePrompt  String?    @db.Text
   startFrameUrl   String?    // for continuity chaining
   endFrameUrl     String?
@@ -244,7 +244,7 @@ model Take {
   videoUrl         String   // S3/R2 URL
   thumbnailUrl     String?
   isHero           Boolean  @default(false)
-  klingTaskId      String?  // for tracking Kling generation
+  klingTaskId      String?  // Legacy field name — kie.ai task ID for generation tracking
   generationParams Json?    // snapshot of params used
   qualityScore     Float?   // 0-1, auto or manual
   createdAt        DateTime @default(now())
@@ -301,17 +301,17 @@ You understand:
 - Narrative structure (setup, conflict, rising action, climax, resolution)
 - Cinematography (70+ camera movements, shot types, lens choices)
 - Visual storytelling (show don't tell, visual metaphors, pacing)
-- Kling 3.0's capabilities and limitations
+- Video generation capabilities and limitations (Kling 3.0 via kie.ai)
 - Prompt engineering for AI video generation
 
 When analyzing a user's movie concept, you ALWAYS output structured JSON alongside your conversational response.
 
 KEY RULES:
-1. Never suggest shots longer than 15 seconds (Kling max per generation)
+1. Never suggest shots longer than 15 seconds (max per generation)
 2. Prefer 5-8 second shots for most scenes (best quality range)
 3. Always describe camera movement relative to the subject
 4. Use one camera movement per shot for best results
-5. For dialogue scenes, suggest Kling's native audio format with [Character: voice description]: "line"
+5. For dialogue scenes, suggest native audio format with [Character: voice description]: "line"
 6. Maintain character description consistency — never vary descriptors between shots
 7. Always include the Style Bible at the end of every assembled prompt
 8. For emotional moments: suggest slow dolly push-in or static close-up
@@ -373,9 +373,9 @@ interface ShotSuggestion {
 
 ### 2. Prompt Assembly Engine
 
-Located in `src/lib/kling/prompts.ts`. Assembles the final Kling prompt from components.
+Located in `src/lib/kling/prompts.ts`. Assembles the final video generation prompt from components.
 
-**Prompt assembly order (critical for Kling 3.0 quality):**
+**Prompt assembly order (critical for quality):**
 ```
 1. Camera/Shot type → HOW the audience sees it
 2. Subject → WHO is on screen (with @Element references)
@@ -392,7 +392,7 @@ function assemblePrompt(shot: Shot, characters: Character[], styleBible: StyleBi
   const cameraBlock = getCameraPromptText(shot.cameraMovement, shot.shotType);
 
   // 2. SUBJECT BLOCK — with character element references
-  // IMPORTANT: Use @CharacterName for Kling element binding
+  // IMPORTANT: Use @element_name for kie.ai element binding
   // IMPORTANT: Do NOT re-describe what's in reference images
   const subjectBlock = buildSubjectBlock(shot.subject, characters);
 
@@ -415,7 +415,7 @@ function assemblePrompt(shot: Shot, characters: Character[], styleBible: StyleBi
 }
 ```
 
-**Kling multi-shot format (for 3.0 storyboard mode):**
+**Multi-shot format (for storyboard mode):**
 ```typescript
 function assembleMultiShotPrompt(shots: Shot[], characters: Character[], styleBible: StyleBible): string {
   // Max 6 shots per multi-shot generation
@@ -429,7 +429,7 @@ function assembleMultiShotPrompt(shots: Shot[], characters: Character[], styleBi
 }
 ```
 
-**Dialogue formatting for Kling 3.0 native audio:**
+**Dialogue formatting for native audio:**
 ```typescript
 function formatDialogue(dialogue: ShotDialogue | null): string {
   if (!dialogue) return "";
@@ -449,7 +449,7 @@ export interface CameraMovement {
   category: "establishing" | "character" | "action" | "transition";
   description: string;
   bestFor: string; // when to use it
-  promptSyntax: string; // exact text to inject into Kling prompts
+  promptSyntax: string; // exact text to inject into video generation prompts
   minDuration: number; // minimum seconds needed
   examplePrompt: string; // full example prompt using this movement
   icon: string; // emoji or icon reference
@@ -684,8 +684,8 @@ Located in `workers/generation-worker.ts`. Runs as a separate process.
 ```typescript
 // BullMQ worker that:
 // 1. Picks up generation jobs from Redis queue
-// 2. Calls Kling API with assembled prompt
-// 3. Polls for completion (Kling is async — typically 30s-3min)
+// 2. Calls kie.ai API with assembled prompt
+// 3. Polls for completion (kie.ai is async — typically 30s-3min)
 // 4. On success: download video, upload to R2, create Take record, extract thumbnail
 // 5. On failure: retry up to 3x with slight prompt variation
 // 6. If all retries fail: refund credits, mark shot as FAILED
@@ -705,7 +705,7 @@ Located in `src/lib/video/assembler.ts`. Uses FFmpeg.
 // 1. Download all hero takes from R2
 // 2. Trim each to the specified duration
 // 3. Apply transitions between shots (cut = direct concat, crossfade = xfade filter)
-// 4. Mix audio layers (dialogue from Kling, music track, ambient)
+// 4. Mix audio layers (dialogue from video generation, music track, ambient)
 // 5. Apply a uniform color LUT if specified
 // 6. Export as MP4 (H.264, AAC audio)
 // 7. Upload to R2
@@ -770,11 +770,14 @@ Each step is a page under `/movies/[movieId]/`. The sidebar shows all steps with
 - Include `select` to limit returned fields
 - Use `onDelete: Cascade` appropriately
 
-### Kling API integration
+### Video generation (kie.ai)
 - Abstract behind a client class in `src/lib/kling/client.ts`
-- Handle rate limiting with exponential backoff
-- Store raw API responses for debugging
-- Map Kling's response format to our internal types
+- Uses kie.ai API: `POST https://api.kie.ai/api/v1/jobs/createTask`, poll with `GET /jobs/recordInfo`
+- Auth: `Authorization: Bearer <KIE_API_KEY>`
+- Model: `kling-3.0/video` for all generation
+- Supports `kling_elements` for character face-locking across shots
+- Handle rate limiting with exponential backoff (20 req/10s limit)
+- Store task IDs for webhook callbacks and debugging
 
 ### Testing
 - Write integration tests for the prompt assembly engine (critical path)
@@ -793,9 +796,8 @@ DATABASE_URL="postgresql://..."
 NEXTAUTH_SECRET="..."
 NEXTAUTH_URL="http://localhost:3000"
 
-# Kling AI
-KLING_API_KEY="..."
-KLING_API_BASE_URL="https://api.klingai.com/v1"  # or fal.ai endpoint
+# kie.ai — Video generation (Kling 3.0 via kie.ai proxy)
+KIE_API_KEY="..."
 
 # Anthropic (AI Director)
 ANTHROPIC_API_KEY="..."
@@ -844,7 +846,7 @@ npm run worker:dev         # starts BullMQ worker in dev mode
 7. **Genre presets** — seed data + style bible editor
 8. **Shot planning** — Shot CRUD + AI suggestions + prompt assembly
 9. **Prompt preview** — live prompt display with component highlighting
-10. **Generation pipeline** — Kling API integration + BullMQ queue + worker
+10. **Generation pipeline** — kie.ai integration + BullMQ queue + worker
 11. **Take management** — Upload handling + comparison UI + hero selection
 12. **Timeline assembly** — Shot ordering + transitions + FFmpeg export
 13. **Credit system** — Ledger, balance checks, Stripe integration
@@ -858,7 +860,7 @@ npm run worker:dev         # starts BullMQ worker in dev mode
 
 ---
 
-## Critical Kling 3.0 Prompt Rules (MUST FOLLOW)
+## Critical Video Generation Prompt Rules (MUST FOLLOW)
 
 These rules are derived from extensive testing and must be enforced by the prompt assembly engine:
 
@@ -868,8 +870,8 @@ These rules are derived from extensive testing and must be enforced by the promp
 4. **Temporal action structure** — beginning → middle → end within each shot
 5. **Name real light sources** — "flickering neon sign casting magenta" not "dramatic lighting"
 6. **Don't re-describe reference images** — only describe what changes
-7. **Use @ElementName syntax** for character references in Kling
-8. **Face reference strength 70–85** — default 42 is too low, above 85 is too rigid
+7. **Use @element_name syntax** for character references via kie.ai elements
+8. **Face reference strength 70–85** — default 42 is too low, above 85 is too rigid (when supported)
 9. **Style Bible goes last** in every prompt
 10. **Negative prompts**: enter exclusions without "no" prefix. Positive description often outperforms negation.
 11. **Creativity slider 40–60%** for best prompt adherence
@@ -889,4 +891,28 @@ These rules are derived from extensive testing and must be enforced by the promp
 - Every generation costs the user real credits — always confirm before spending, show estimated cost, and provide refunds on failures
 - The prompt assembly engine should produce prompts that a filmmaker would recognize as well-structured scene directions
 - Keep the free tier genuinely useful — 50 credits = ~3 draft shots or 1 standard shot, enough to understand the product
+
+---
+
+## Consistency Improvement Tracker (delete each item after implementing)
+
+### P0 — Character Consistency (People)
+
+1. ~~**Switch to kie.ai with Elements API**~~ — DONE. Client rewritten to use `api.kie.ai` with `kling_elements` support. `buildSubjectBlock()` now injects `@element_name` for characters with reference images. Generate route passes character elements automatically.
+
+2. **Improve element reference images** — Current Wikipedia headshots are single images. kie.ai elements work best with 2-4 images from multiple angles. Add UI for uploading additional character reference images. Upload images to kie.ai temp storage (`kieai.redpandaai.co/api/file-url-upload`) before generation.
+
+3. **Non-sequential character continuity** — If a character appears in shots 1, 5, 10, shots 5 and 10 have no visual link to shot 1. Fix: store per-character reference frames (best frame from their first generated appearance) and feed them as additional `element_input_urls` for all subsequent shots featuring that character.
+
+### P1 — Environment Consistency
+
+4. **Scene-level reference frame** — After generating the first shot in a scene, store its frame as a scene reference. Feed it as `startImageUrl` (or as an element) for all subsequent shots in the same scene, not just the next sequential shot. Add `sceneReferenceFrameUrl` to the Shot or a new SceneReference model.
+
+5. **Deterministic lighting per scene** — `pickLighting()` in `shot-planner.ts` randomly picks 2-3 keywords from the genre pool each time. Fix: seed the random selection per scene (hash sceneIndex) or pick lighting once per scene and reuse for all beats.
+
+### P2 — Prompt Quality
+
+6. ~~**negative_prompt and cfg_scale not sent**~~ — DONE. kie.ai client for Kling 3.0 does not send these params (they are v1.x only). Prompt quality comes from positive description only.
+
+7. ~~**camera_control removed**~~ — DONE. Camera movements described in prompt text only. Old types removed from `types.ts`.
 

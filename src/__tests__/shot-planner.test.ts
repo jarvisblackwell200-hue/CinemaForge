@@ -12,14 +12,14 @@ const characters = [
     name: "Marcus",
     role: "protagonist",
     visualDescription: "A weathered man in his 50s with a gray trenchcoat and stubble",
-    klingElementId: null,
+    referenceImages: [],
   },
   {
     id: "char-2",
     name: "Elena",
     role: "supporting",
     visualDescription: "A young woman with dark hair, red scarf, and intense eyes",
-    klingElementId: null,
+    referenceImages: [],
   },
 ];
 

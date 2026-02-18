@@ -34,13 +34,13 @@ const characters = [
     id: "char-1",
     name: "Marcus",
     visualDescription: "A weathered man in his 50s with a gray trenchcoat",
-    klingElementId: "kling-elem-123",
+    hasReferenceImages: true,
   },
   {
     id: "char-2",
     name: "Elena",
     visualDescription: "A young woman with dark hair and a red scarf",
-    klingElementId: null,
+    hasReferenceImages: false,
   },
 ];
 
@@ -184,23 +184,22 @@ describe("assemblePrompt", () => {
 // ─── buildSubjectBlock ──────────────────────────────────────────
 
 describe("buildSubjectBlock", () => {
-  it("adds @Element reference for characters with klingElementId", () => {
+  it("adds @element_ reference for characters with reference images", () => {
     const result = buildSubjectBlock(
       "Marcus walks through the rain",
       characters
     );
-    expect(result).toContain("@Marcus");
-    expect(result).not.toContain("Detective Marcus"); // unchanged since "Detective" not in subject
+    expect(result).toContain("@element_marcus");
   });
 
-  it("does not add @Element for characters without klingElementId", () => {
+  it("does not add @element_ for characters without reference images", () => {
     const result = buildSubjectBlock(
       "Elena waits at the corner",
       characters
     );
-    // Elena has no klingElementId, so no @ prefix
+    // Elena has no reference images, so no @ prefix
     expect(result).toContain("Elena");
-    expect(result).not.toContain("@Elena");
+    expect(result).not.toContain("@element_elena");
   });
 
   it("returns subject unchanged when no characters match", () => {
@@ -216,8 +215,8 @@ describe("buildSubjectBlock", () => {
       "Marcus confronts Elena in the alley",
       characters
     );
-    expect(result).toContain("@Marcus");
-    expect(result).toContain("Elena"); // no @ because no klingElementId
+    expect(result).toContain("@element_marcus");
+    expect(result).toContain("Elena"); // no @ because no reference images
   });
 });
 

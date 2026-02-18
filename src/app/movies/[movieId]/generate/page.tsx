@@ -93,7 +93,6 @@ export default function GeneratePage() {
   const [shots, setShots] = useState<ShotData[]>([]);
   const [characters, setCharacters] = useState<CharacterData[]>([]);
   const [summary, setSummary] = useState<GenerationSummary | null>(null);
-  const [isDryRun, setIsDryRun] = useState(true);
   const [loading, setLoading] = useState(true);
   const [quality, setQuality] = useState<QualityTier>("draft");
   const [generateAudio, setGenerateAudio] = useState(false);
@@ -117,7 +116,6 @@ export default function GeneratePage() {
       if (data.success) {
         setShots(data.data.shots);
         setSummary(data.data.summary);
-        setIsDryRun(data.data.isDryRun);
       }
 
       if (charsRes.ok) {
@@ -339,14 +337,6 @@ export default function GeneratePage() {
             <div className="flex items-center gap-2">
               <Play className="h-4 w-4 text-primary" />
               <h2 className="text-sm font-semibold">Generate</h2>
-              {isDryRun && (
-                <Badge
-                  variant="outline"
-                  className="border-yellow-500/30 text-yellow-500 text-[10px]"
-                >
-                  DRY RUN
-                </Badge>
-              )}
               {summary && (
                 <Badge variant="secondary" className="text-xs">
                   {summary.complete}/{summary.total} complete
@@ -354,7 +344,7 @@ export default function GeneratePage() {
               )}
             </div>
             <p className="mt-1 text-xs text-muted-foreground">
-              Generate video for each shot. {isDryRun ? "Dry-run mode: no API calls, mock results." : "Live mode: generates real video via Kling 3.0."}
+              Generate video for each shot via kie.ai (Kling 3.0).
             </p>
           </div>
 
@@ -521,9 +511,7 @@ export default function GeneratePage() {
               {pendingShots.length !== 1 ? "s" : ""} at{" "}
               <span className="font-medium text-foreground">{quality}</span>{" "}
               quality.
-              {isDryRun
-                ? " Dry-run mode: mock videos, no real API calls."
-                : " Real generation via Kling 3.0."}
+              {" "}This will use real credits via kie.ai.
             </DialogDescription>
           </DialogHeader>
           <div className="rounded-lg border border-border bg-card/50 p-4">
@@ -547,7 +535,7 @@ export default function GeneratePage() {
             </Button>
             <Button onClick={generateAll}>
               <Zap className="mr-1.5 h-4 w-4" />
-              {isDryRun ? "Generate (Dry Run)" : "Generate"}
+              Generate
             </Button>
           </DialogFooter>
         </DialogContent>

@@ -1,87 +1,102 @@
 /**
- * Quick test: generate a single 5s video via fal.ai Kling O3
+ * Quick test: generate a single 5s video via kie.ai (Kling 3.0)
  * Run: npx tsx scripts/test-kling.ts
  */
-import { fal } from "@fal-ai/client";
 import "dotenv/config";
 
-fal.config({
-  credentials: process.env.FAL_KEY,
-});
+const KIE_BASE = "https://api.kie.ai/api/v1";
 
 const prompt =
   "Slow dolly push-in from medium shot to close-up. A weathered detective in a gray trenchcoat sits alone at a rain-streaked bar window. He lifts his glass and stares into the amber liquid, then sets it down untouched. Single warm bulb overhead, neon sign flickering through window. Desaturated teal grade, crushed blacks, shot on 35mm film, heavy grain. 4K.";
+
+async function createTask(input: Record<string, unknown>) {
+  const res = await fetch(`${KIE_BASE}/jobs/createTask`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.KIE_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "kling-3.0/video",
+      input,
+    }),
+  });
+
+  const json = await res.json();
+  if (json.code !== 200) throw new Error(`createTask failed: ${json.msg}`);
+  return json.data.taskId as string;
+}
+
+async function pollUntilDone(taskId: string) {
+  console.log(`  Polling task ${taskId}...`);
+  const start = Date.now();
+
+  while (Date.now() - start < 300_000) {
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const res = await fetch(
+      `${KIE_BASE}/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`,
+      { headers: { Authorization: `Bearer ${process.env.KIE_API_KEY}` } },
+    );
+
+    const json = await res.json();
+    const state = json.data?.state;
+    console.log(`  State: ${state} (${((Date.now() - start) / 1000).toFixed(0)}s)`);
+
+    if (state === "success") {
+      const result = JSON.parse(json.data.resultJson);
+      return result.resultUrls;
+    }
+
+    if (state === "fail") {
+      throw new Error(`Generation failed: ${json.data.failMsg}`);
+    }
+  }
+
+  throw new Error("Timed out after 5 minutes");
+}
 
 async function testTextToVideo() {
   console.log("=== Test 1: text-to-video ===");
   console.log(`Prompt: ${prompt.slice(0, 60)}...`);
 
-  const input = {
-    prompt,
-    duration: "5",
-    aspect_ratio: "16:9",
-    generate_audio: false,
-  };
-  console.log("Input:", JSON.stringify(input, null, 2));
-
   try {
-    const result = await fal.subscribe(
-      "fal-ai/kling-video/o3/standard/text-to-video" as never,
-      {
-        input,
-        logs: true,
-        onQueueUpdate: (update: { status: string }) => {
-          console.log(`  Status: ${update.status}`);
-        },
-      } as never
-    );
-
-    console.log("SUCCESS:", JSON.stringify((result as { data: unknown }).data, null, 2).slice(0, 300));
-  } catch (err: unknown) {
-    const e = err as { status?: number; body?: unknown; message?: string };
-    console.error("FAILED:");
-    console.error("  Status:", e.status);
-    console.error("  Message:", e.message);
-    console.error("  Body:", JSON.stringify(e.body, null, 2));
+    const taskId = await createTask({
+      prompt,
+      sound: false,
+      duration: "5",
+      aspect_ratio: "16:9",
+      mode: "std",
+      multi_shots: false,
+    });
+    const urls = await pollUntilDone(taskId);
+    console.log("SUCCESS:", urls);
+  } catch (err) {
+    console.error("FAILED:", err);
   }
 }
 
 async function testImageToVideo() {
   console.log("\n=== Test 2: image-to-video ===");
 
-  // Use a simple public test image
-  const input = {
-    prompt: "A character walks forward slowly",
-    image_url: "https://fal.media/files/elephant/8kRB4w4jEReOaWWS3MXrK.png",
-    duration: "5",
-    generate_audio: false,
-  };
-  console.log("Input:", JSON.stringify(input, null, 2));
-
   try {
-    const result = await fal.subscribe(
-      "fal-ai/kling-video/o3/standard/image-to-video" as never,
-      {
-        input,
-        logs: true,
-        onQueueUpdate: (update: { status: string }) => {
-          console.log(`  Status: ${update.status}`);
-        },
-      } as never
-    );
-
-    console.log("SUCCESS:", JSON.stringify((result as { data: unknown }).data, null, 2).slice(0, 300));
-  } catch (err: unknown) {
-    const e = err as { status?: number; body?: unknown; message?: string };
-    console.error("FAILED:");
-    console.error("  Status:", e.status);
-    console.error("  Message:", e.message);
-    console.error("  Body:", JSON.stringify(e.body, null, 2));
+    const taskId = await createTask({
+      prompt: "A character walks forward slowly",
+      image_urls: ["https://upload.wikimedia.org/wikipedia/commons/thumb/4/4c/Brad_Pitt_2019_by_Glenn_Francis.jpg/440px-Brad_Pitt_2019_by_Glenn_Francis.jpg"],
+      sound: false,
+      duration: "5",
+      mode: "std",
+      multi_shots: false,
+    });
+    const urls = await pollUntilDone(taskId);
+    console.log("SUCCESS:", urls);
+  } catch (err) {
+    console.error("FAILED:", err);
   }
 }
 
 async function main() {
-  console.log("FAL_KEY:", process.env.FAL_KEY ? "set" : "NOT SET");
+  console.log("KIE_API_KEY:", process.env.KIE_API_KEY ? "set" : "NOT SET");
   console.log();
   await testTextToVideo();
   await testImageToVideo();
