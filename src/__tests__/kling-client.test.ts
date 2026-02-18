@@ -1,401 +1,326 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import type { GenerateVideoInput, GenerateVideoResult, GenerationProgress } from "@/lib/kling/client";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 
-// ─── Timer setup ───────────────────────────────────────────────
-// The dry-run simulation uses setTimeout delays (~3s total).
-// We use fake timers to run tests instantly.
+// ─── Mock fal.ai client ─────────────────────────────────────────
+// We capture the arguments passed to fal.subscribe to verify buildFalInput()
+// without needing to export internal helpers.
+
+let capturedEndpoint: string | undefined;
+let capturedInput: Record<string, unknown> | undefined;
+
+vi.mock("@fal-ai/client", () => ({
+  fal: {
+    config: vi.fn(),
+    subscribe: vi.fn(async (endpoint: string, opts: { input: Record<string, unknown> }) => {
+      capturedEndpoint = endpoint;
+      capturedInput = opts.input;
+      return {
+        data: {
+          video: {
+            url: "https://fal.ai/mock-video.mp4",
+            file_size: 1_000_000,
+          },
+        },
+      };
+    }),
+  },
+}));
+
+// Mock sharp to avoid actual image processing
+vi.mock("sharp", () => {
+  const mockSharp = vi.fn(() => ({
+    metadata: vi.fn(async () => ({ width: 1024, height: 768 })),
+    resize: vi.fn().mockReturnThis(),
+    jpeg: vi.fn().mockReturnThis(),
+    toBuffer: vi.fn(async () => Buffer.from("mock")),
+  }));
+  return { default: mockSharp };
+});
+
+// Mock Supabase
+vi.mock("@supabase/supabase-js", () => ({
+  createClient: vi.fn(() => ({
+    storage: {
+      from: vi.fn(() => ({
+        upload: vi.fn(async () => ({ error: null })),
+        getPublicUrl: vi.fn(() => ({ data: { publicUrl: "https://mock/upscaled.jpg" } })),
+      })),
+    },
+  })),
+}));
+
+import { generateVideo, isDryRunMode } from "@/lib/kling/client";
+import type { GenerateVideoInput } from "@/lib/kling/client";
 
 beforeEach(() => {
-  vi.useFakeTimers();
+  capturedEndpoint = undefined;
+  capturedInput = undefined;
+  // Set required env vars
+  process.env.FAL_KEY = "test-key";
+  process.env.NEXT_PUBLIC_SUPABASE_URL = "https://mock.supabase.co";
+  process.env.SUPABASE_SECRET_KEY = "mock-secret";
 });
 
-afterEach(() => {
-  vi.useRealTimers();
-});
-
-/**
- * Helper: call generateVideo and advance fake timers until it resolves.
- * We dynamically import the module so fake timers are active at call time.
- */
-async function runGenerateVideo(
-  input: GenerateVideoInput,
-  onProgress?: (progress: GenerationProgress) => void
-): Promise<GenerateVideoResult> {
-  const { generateVideo } = await import("@/lib/kling/client");
-  const promise = generateVideo(input, onProgress);
-  // The dry-run does 6 steps with setTimeout(~500ms each = 3000ms total).
-  // Advance timers enough to complete all steps.
-  for (let i = 0; i < 10; i++) {
-    await vi.advanceTimersByTimeAsync(600);
-  }
-  return promise;
-}
-
-// ─── isDryRunMode ──────────────────────────────────────────────
+// ─── isDryRunMode ────────────────────────────────────────────────
 
 describe("isDryRunMode", () => {
-  it("returns true by default (KLING_DRY_RUN not set to 'false')", async () => {
-    const { isDryRunMode } = await import("@/lib/kling/client");
-    expect(isDryRunMode()).toBe(true);
-  });
-
-  it("returns a boolean value", async () => {
-    const { isDryRunMode } = await import("@/lib/kling/client");
-    expect(typeof isDryRunMode()).toBe("boolean");
+  it("returns false (dry-run mode removed)", () => {
+    expect(isDryRunMode()).toBe(false);
   });
 });
 
-// ─── Dry-run result shape ──────────────────────────────────────
+// ─── Endpoint selection ──────────────────────────────────────────
 
-describe("generateVideo (dry-run mode)", () => {
-  const minimalInput: GenerateVideoInput = {
-    prompt: "A detective walks through a foggy alley at night",
-    duration: 5,
-    quality: "draft",
-  };
+describe("endpoint selection", () => {
+  it("uses text-to-video/standard for draft quality without image", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(capturedEndpoint).toBe("fal-ai/kling-video/o3/standard/text-to-video");
+  });
 
-  it("returns correct shape with all required fields", async () => {
-    const result = await runGenerateVideo(minimalInput);
+  it("uses text-to-video/pro for cinema quality without image", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "cinema" });
+    expect(capturedEndpoint).toBe("fal-ai/kling-video/o3/pro/text-to-video");
+  });
 
+  it("uses text-to-video/standard for standard quality without image", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "standard" });
+    expect(capturedEndpoint).toBe("fal-ai/kling-video/o3/standard/text-to-video");
+  });
+
+  it("uses image-to-video/standard for draft quality with image", async () => {
+    await generateVideo({
+      prompt: "Test",
+      duration: 5,
+      quality: "draft",
+      startImageUrl: "https://example.com/image.jpg",
+    });
+    expect(capturedEndpoint).toBe("fal-ai/kling-video/o3/standard/image-to-video");
+  });
+
+  it("uses image-to-video/pro for cinema quality with image", async () => {
+    await generateVideo({
+      prompt: "Test",
+      duration: 5,
+      quality: "cinema",
+      startImageUrl: "https://example.com/image.jpg",
+    });
+    expect(capturedEndpoint).toBe("fal-ai/kling-video/o3/pro/image-to-video");
+  });
+});
+
+// ─── buildFalInput: negative_prompt (Fix #1) ─────────────────────
+
+describe("buildFalInput — negative_prompt", () => {
+  it("passes negative_prompt to fal.ai payload", async () => {
+    await generateVideo({
+      prompt: "A sunset",
+      negativePrompt: "blur, noise, artifacts",
+      duration: 5,
+      quality: "draft",
+    });
+    expect(capturedInput?.negative_prompt).toBe("blur, noise, artifacts");
+  });
+
+  it("sends undefined negative_prompt when not provided", async () => {
+    await generateVideo({ prompt: "A sunset", duration: 5, quality: "draft" });
+    expect(capturedInput?.negative_prompt).toBeUndefined();
+  });
+});
+
+// ─── buildFalInput: cfg_scale (Fix #2) ──────────────────────────
+
+describe("buildFalInput — cfg_scale", () => {
+  it("defaults cfg_scale to 0.5 when not provided", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(capturedInput?.cfg_scale).toBe(0.5);
+  });
+
+  it("passes custom cfg_scale when provided", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "draft", cfgScale: 0.7 });
+    expect(capturedInput?.cfg_scale).toBe(0.7);
+  });
+});
+
+// ─── buildFalInput: aspect_ratio (Fix #3) ───────────────────────
+
+describe("buildFalInput — aspect_ratio", () => {
+  it("defaults aspect_ratio to 16:9 for text-to-video", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(capturedInput?.aspect_ratio).toBe("16:9");
+  });
+
+  it("passes custom aspect_ratio for text-to-video", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "draft", aspectRatio: "9:16" });
+    expect(capturedInput?.aspect_ratio).toBe("9:16");
+  });
+
+  it("includes aspect_ratio for image-to-video mode (Fix #3)", async () => {
+    await generateVideo({
+      prompt: "Test",
+      duration: 5,
+      quality: "draft",
+      startImageUrl: "https://example.com/image.jpg",
+      aspectRatio: "1:1",
+    });
+    expect(capturedInput?.aspect_ratio).toBe("1:1");
+  });
+
+  it("defaults aspect_ratio to 16:9 for image-to-video mode", async () => {
+    await generateVideo({
+      prompt: "Test",
+      duration: 5,
+      quality: "draft",
+      startImageUrl: "https://example.com/image.jpg",
+    });
+    expect(capturedInput?.aspect_ratio).toBe("16:9");
+  });
+});
+
+// ─── buildFalInput: other fields ────────────────────────────────
+
+describe("buildFalInput — core fields", () => {
+  it("includes prompt in payload", async () => {
+    await generateVideo({ prompt: "A detective walks", duration: 5, quality: "draft" });
+    expect(capturedInput?.prompt).toBe("A detective walks");
+  });
+
+  it("clamps duration to string within 3-15 range", async () => {
+    await generateVideo({ prompt: "Test", duration: 1, quality: "draft" });
+    expect(capturedInput?.duration).toBe("3");
+
+    await generateVideo({ prompt: "Test", duration: 20, quality: "draft" });
+    expect(capturedInput?.duration).toBe("15");
+
+    await generateVideo({ prompt: "Test", duration: 8, quality: "draft" });
+    expect(capturedInput?.duration).toBe("8");
+  });
+
+  it("rounds fractional durations", async () => {
+    await generateVideo({ prompt: "Test", duration: 5.7, quality: "draft" });
+    expect(capturedInput?.duration).toBe("6");
+  });
+
+  it("defaults generate_audio to false", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(capturedInput?.generate_audio).toBe(false);
+  });
+
+  it("passes generate_audio when true", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "draft", generateAudio: true });
+    expect(capturedInput?.generate_audio).toBe(true);
+  });
+});
+
+// ─── Image-to-video specific fields ─────────────────────────────
+
+describe("buildFalInput — image-to-video", () => {
+  it("sets image_url for image-to-video mode", async () => {
+    await generateVideo({
+      prompt: "Test",
+      duration: 5,
+      quality: "draft",
+      startImageUrl: "https://example.com/image.jpg",
+    });
+    expect(capturedInput?.image_url).toBeTruthy();
+  });
+
+  it("does not set image_url for text-to-video mode", async () => {
+    await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(capturedInput?.image_url).toBeUndefined();
+  });
+
+  it("sets end_image_url when endImageUrl provided with startImageUrl", async () => {
+    await generateVideo({
+      prompt: "Test",
+      duration: 5,
+      quality: "draft",
+      startImageUrl: "https://example.com/start.jpg",
+      endImageUrl: "https://example.com/end.jpg",
+    });
+    expect(capturedInput?.end_image_url).toBe("https://example.com/end.jpg");
+  });
+});
+
+// ─── Result shape ────────────────────────────────────────────────
+
+describe("generateVideo result", () => {
+  it("returns correct shape", async () => {
+    const result = await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
     expect(result).toHaveProperty("videoUrl");
     expect(result).toHaveProperty("fileSize");
     expect(result).toHaveProperty("durationMs");
     expect(result).toHaveProperty("isDryRun");
   });
 
-  it("returns isDryRun: true in dry-run mode", async () => {
-    const result = await runGenerateVideo(minimalInput);
-    expect(result.isDryRun).toBe(true);
+  it("returns isDryRun: false for live generation", async () => {
+    const result = await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(result.isDryRun).toBe(false);
   });
 
-  it("returns a valid videoUrl string", async () => {
-    const result = await runGenerateVideo(minimalInput);
-    expect(typeof result.videoUrl).toBe("string");
-    expect(result.videoUrl.length).toBeGreaterThan(0);
-    expect(result.videoUrl).toMatch(/^https?:\/\//);
+  it("returns videoUrl from fal.ai response", async () => {
+    const result = await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(result.videoUrl).toBe("https://fal.ai/mock-video.mp4");
   });
 
-  it("returns a positive fileSize", async () => {
-    const result = await runGenerateVideo(minimalInput);
-    expect(result.fileSize).toBeGreaterThan(0);
-    expect(typeof result.fileSize).toBe("number");
+  it("returns fileSize from fal.ai response", async () => {
+    const result = await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(result.fileSize).toBe(1_000_000);
   });
 
-  it("returns a positive durationMs", async () => {
-    const result = await runGenerateVideo(minimalInput);
-    expect(result.durationMs).toBeGreaterThan(0);
-    expect(typeof result.durationMs).toBe("number");
-  });
-
-  it("returns consistent mock URL across calls", async () => {
-    const result1 = await runGenerateVideo(minimalInput);
-    const result2 = await runGenerateVideo(minimalInput);
-    expect(result1.videoUrl).toBe(result2.videoUrl);
-  });
-
-  it("returns consistent fileSize across calls", async () => {
-    const result1 = await runGenerateVideo(minimalInput);
-    const result2 = await runGenerateVideo(minimalInput);
-    expect(result1.fileSize).toBe(result2.fileSize);
+  it("returns positive durationMs", async () => {
+    const result = await generateVideo({ prompt: "Test", duration: 5, quality: "draft" });
+    expect(result.durationMs).toBeGreaterThanOrEqual(0);
   });
 });
 
-// ─── Input parameter acceptance ────────────────────────────────
+// ─── Full payload snapshot ──────────────────────────────────────
 
-describe("generateVideo input parameters", () => {
-  it("accepts minimal required input", async () => {
-    const result = await runGenerateVideo({
-      prompt: "A car driving down a highway",
-      duration: 5,
-      quality: "draft",
-    });
-    expect(result.isDryRun).toBe(true);
-  });
-
-  it("accepts all quality tiers without error", async () => {
-    const qualities = ["draft", "standard", "cinema"] as const;
-    for (const quality of qualities) {
-      const result = await runGenerateVideo({
-        prompt: "Test prompt",
-        duration: 5,
-        quality,
-      });
-      expect(result.isDryRun).toBe(true);
-    }
-  });
-
-  it("accepts all aspect ratios without error", async () => {
-    const ratios = ["16:9", "9:16", "1:1"] as const;
-    for (const aspectRatio of ratios) {
-      const result = await runGenerateVideo({
-        prompt: "Test prompt",
-        duration: 5,
-        quality: "standard",
-        aspectRatio,
-      });
-      expect(result.isDryRun).toBe(true);
-    }
-  });
-
-  it("accepts negativePrompt parameter", async () => {
-    const result = await runGenerateVideo({
-      prompt: "A sunset over mountains",
-      negativePrompt: "blur, distort, low quality",
-      duration: 5,
-      quality: "standard",
-    });
-    expect(result.isDryRun).toBe(true);
-  });
-
-  it("accepts generateAudio parameter", async () => {
-    const result = await runGenerateVideo({
-      prompt: "A person speaking",
-      duration: 5,
-      quality: "standard",
-      generateAudio: true,
-    });
-    expect(result.isDryRun).toBe(true);
-  });
-
-  it("accepts cfgScale parameter", async () => {
-    const result = await runGenerateVideo({
-      prompt: "Test scene",
-      duration: 5,
-      quality: "draft",
-      cfgScale: 0.7,
-    });
-    expect(result.isDryRun).toBe(true);
-  });
-
-  it("accepts startImageUrl for image-to-video", async () => {
-    const result = await runGenerateVideo({
-      prompt: "A character begins to walk",
-      duration: 5,
-      quality: "standard",
-      startImageUrl: "https://example.com/start-frame.jpg",
-    });
-    expect(result.isDryRun).toBe(true);
-  });
-
-  it("accepts endImageUrl for continuity chaining", async () => {
-    const result = await runGenerateVideo({
-      prompt: "Scene continues from previous shot",
-      duration: 5,
-      quality: "standard",
-      endImageUrl: "https://example.com/end-frame.jpg",
-    });
-    expect(result.isDryRun).toBe(true);
-  });
-
-  it("accepts image-to-video with character reference", async () => {
-    const result = await runGenerateVideo({
-      prompt: "@Detective walks into the room",
-      duration: 5,
-      quality: "cinema",
-      startImageUrl: "https://example.com/detective-ref.jpg",
-    });
-    expect(result.videoUrl).toBeTruthy();
-  });
-
-  it("accepts full input with all optional parameters", async () => {
-    const fullInput: GenerateVideoInput = {
-      prompt: "A noir detective walks through rain-soaked streets",
-      negativePrompt: "bright colors, cheerful, cartoon",
+describe("buildFalInput — full payload verification", () => {
+  it("constructs complete text-to-video payload with all options", async () => {
+    const input: GenerateVideoInput = {
+      prompt: "A noir detective walks through rain",
+      negativePrompt: "bright, cheerful",
       duration: 8,
       aspectRatio: "16:9",
       quality: "cinema",
       generateAudio: true,
-      cfgScale: 0.5,
-      startImageUrl: "https://example.com/start.jpg",
-      endImageUrl: "https://example.com/end.jpg",
-    };
-    const result = await runGenerateVideo(fullInput);
-    expect(result.isDryRun).toBe(true);
-    expect(result.videoUrl).toBeTruthy();
-  });
-
-  it("accepts various durations (3-15s range)", async () => {
-    const durations = [3, 5, 8, 10, 15];
-    for (const duration of durations) {
-      const result = await runGenerateVideo({
-        prompt: "Test",
-        duration,
-        quality: "draft",
-      });
-      expect(result.isDryRun).toBe(true);
-    }
-  });
-});
-
-// ─── onProgress callback ───────────────────────────────────────
-
-describe("generateVideo onProgress callback", () => {
-  it("calls onProgress callback during dry-run generation", async () => {
-    const progressUpdates: GenerationProgress[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      progressUpdates.push({ ...progress });
+      cfgScale: 0.6,
     };
 
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
+    await generateVideo(input);
 
-    expect(progressUpdates.length).toBeGreaterThan(0);
-  });
-
-  it("emits COMPLETED as the final status", async () => {
-    const progressUpdates: GenerationProgress[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      progressUpdates.push({ ...progress });
-    };
-
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    const lastUpdate = progressUpdates[progressUpdates.length - 1];
-    expect(lastUpdate.status).toBe("COMPLETED");
-  });
-
-  it("emits IN_PROGRESS status before COMPLETED", async () => {
-    const statuses: string[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      statuses.push(progress.status);
-    };
-
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    // There should be at least one IN_PROGRESS before COMPLETED
-    const completedIndex = statuses.lastIndexOf("COMPLETED");
-    const inProgressIndex = statuses.indexOf("IN_PROGRESS");
-    expect(inProgressIndex).toBeGreaterThanOrEqual(0);
-    expect(inProgressIndex).toBeLessThan(completedIndex);
-  });
-
-  it("provides increasing elapsedMs values", async () => {
-    const elapsedValues: number[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      elapsedValues.push(progress.elapsedMs);
-    };
-
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    // Each elapsed time should be >= the previous
-    for (let i = 1; i < elapsedValues.length; i++) {
-      expect(elapsedValues[i]).toBeGreaterThanOrEqual(elapsedValues[i - 1]);
-    }
-  });
-
-  it("provides logs array in each progress update", async () => {
-    const progressUpdates: GenerationProgress[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      progressUpdates.push({ ...progress });
-    };
-
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    for (const update of progressUpdates) {
-      expect(Array.isArray(update.logs)).toBe(true);
-    }
-  });
-
-  it("includes dry-run marker in log messages", async () => {
-    const allLogs: string[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      allLogs.push(...progress.logs);
-    };
-
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    const hasDryRunLog = allLogs.some((log) => log.includes("dry-run"));
-    expect(hasDryRunLog).toBe(true);
-  });
-
-  it("includes step progress in log messages", async () => {
-    const allLogs: string[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      allLogs.push(...progress.logs);
-    };
-
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    // Should have step indicators like "Step 1/6"
-    const hasStepLog = allLogs.some((log) => /Step \d+\/\d+/.test(log));
-    expect(hasStepLog).toBe(true);
-  });
-
-  it("works without onProgress callback (undefined)", async () => {
-    // Should not throw when no callback is provided
-    const result = await runGenerateVideo({
-      prompt: "Test prompt",
-      duration: 5,
-      quality: "draft",
+    expect(capturedInput).toMatchObject({
+      prompt: "A noir detective walks through rain",
+      negative_prompt: "bright, cheerful",
+      duration: "8",
+      cfg_scale: 0.6,
+      generate_audio: true,
+      aspect_ratio: "16:9",
     });
-    expect(result.isDryRun).toBe(true);
+    expect(capturedInput?.image_url).toBeUndefined();
   });
 
-  it("emits exactly 6 progress updates in dry-run mode", async () => {
-    const progressUpdates: GenerationProgress[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      progressUpdates.push({ ...progress });
-    };
+  it("constructs complete image-to-video payload with all options", async () => {
+    await generateVideo({
+      prompt: "Character starts walking",
+      negativePrompt: "blur",
+      duration: 5,
+      aspectRatio: "9:16",
+      quality: "standard",
+      generateAudio: false,
+      cfgScale: 0.4,
+      startImageUrl: "https://example.com/ref.jpg",
+      endImageUrl: "https://example.com/end.jpg",
+    });
 
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    expect(progressUpdates.length).toBe(6);
-  });
-
-  it("emits 5 IN_PROGRESS and 1 COMPLETED in dry-run mode", async () => {
-    const statuses: string[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      statuses.push(progress.status);
-    };
-
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    const inProgressCount = statuses.filter((s) => s === "IN_PROGRESS").length;
-    const completedCount = statuses.filter((s) => s === "COMPLETED").length;
-    expect(inProgressCount).toBe(5);
-    expect(completedCount).toBe(1);
-  });
-
-  it("each progress update has a valid status enum value", async () => {
-    const validStatuses = new Set(["IN_QUEUE", "IN_PROGRESS", "COMPLETED"]);
-    const progressUpdates: GenerationProgress[] = [];
-    const onProgress = (progress: GenerationProgress) => {
-      progressUpdates.push({ ...progress });
-    };
-
-    await runGenerateVideo(
-      { prompt: "Test prompt", duration: 5, quality: "draft" },
-      onProgress
-    );
-
-    for (const update of progressUpdates) {
-      expect(validStatuses.has(update.status)).toBe(true);
-    }
+    expect(capturedInput).toMatchObject({
+      prompt: "Character starts walking",
+      negative_prompt: "blur",
+      duration: "5",
+      cfg_scale: 0.4,
+      generate_audio: false,
+      aspect_ratio: "9:16",
+      end_image_url: "https://example.com/end.jpg",
+    });
+    expect(capturedInput?.image_url).toBeTruthy();
   });
 });

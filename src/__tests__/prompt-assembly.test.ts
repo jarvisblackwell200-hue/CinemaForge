@@ -95,6 +95,74 @@ describe("assemblePrompt", () => {
     expect(result).toContain("Some things you can't unsee.");
   });
 
+  it("omits dialogue when includeDialogue is false (Fix #5)", () => {
+    const shotWithDialogue = {
+      ...baseShot,
+      dialogue: {
+        characterId: "char-1",
+        characterName: "Marcus",
+        line: "Some things you can't unsee.",
+        emotion: "weary",
+      },
+      includeDialogue: false,
+    };
+    const result = assemblePrompt(shotWithDialogue, [], null);
+    expect(result).not.toContain("[Marcus");
+    expect(result).not.toContain("unsee");
+  });
+
+  it("includes dialogue by default when includeDialogue is undefined", () => {
+    const shotWithDialogue = {
+      ...baseShot,
+      dialogue: {
+        characterId: "char-1",
+        characterName: "Marcus",
+        line: "Some things you can't unsee.",
+        emotion: "weary",
+      },
+      // includeDialogue not set — should default to true
+    };
+    const result = assemblePrompt(shotWithDialogue, [], null);
+    expect(result).toContain("[Marcus, weary voice]");
+  });
+
+  it("includes dialogue when includeDialogue is explicitly true", () => {
+    const shotWithDialogue = {
+      ...baseShot,
+      dialogue: {
+        characterId: "char-1",
+        characterName: "Marcus",
+        line: "Let's go.",
+        emotion: "determined",
+      },
+      includeDialogue: true,
+    };
+    const result = assemblePrompt(shotWithDialogue, [], null);
+    expect(result).toContain("[Marcus, determined voice]");
+    expect(result).toContain("Let's go.");
+  });
+
+  it("omitting dialogue does not affect other blocks", () => {
+    const shot = {
+      ...baseShot,
+      dialogue: {
+        characterId: "char-1",
+        characterName: "Marcus",
+        line: "Hello",
+        emotion: "calm",
+      },
+      includeDialogue: false,
+    };
+    const result = assemblePrompt(shot, [], styleBible);
+    // Camera, subject, action, environment, lighting, and style bible should still be present
+    expect(result).toContain("dolly push-in");
+    expect(result).toContain("Detective Marcus");
+    expect(result).toContain("lifts his glass");
+    expect(result).toContain("speakeasy");
+    expect(result).toContain("warm bulb");
+    expect(result).toContain("Desaturated teal");
+  });
+
   it("does not combine shot type with camera movement if already included", () => {
     const result = assemblePrompt(baseShot, [], null);
     // The camera movement already contains "close-up", so shotType shouldn't be appended separately
