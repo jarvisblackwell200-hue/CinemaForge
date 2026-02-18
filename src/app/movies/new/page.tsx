@@ -2,10 +2,12 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Film } from "lucide-react";
+import { ArrowRight, Film, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
 import { Header } from "@/components/layout/Header";
+import { QuickCreateDialog } from "@/components/movie/QuickCreateDialog";
 
 const GENRE_OPTIONS = [
   { id: "noir", label: "Film Noir", gradient: "from-slate-800 to-teal-900" },
@@ -29,6 +31,7 @@ export default function NewMoviePage() {
   const [title, setTitle] = useState("");
   const [genre, setGenre] = useState<string | null>(null);
   const [isCreating, setIsCreating] = useState(false);
+  const [quickCreateOpen, setQuickCreateOpen] = useState(false);
 
   async function handleCreate() {
     if (!title.trim()) return;
@@ -133,9 +136,25 @@ export default function NewMoviePage() {
                 </>
               )}
             </Button>
+
+            <div className="flex items-center gap-3">
+              <Separator className="flex-1" />
+              <span className="text-xs text-muted-foreground">or</span>
+              <Separator className="flex-1" />
+            </div>
+
+            <Button
+              variant="outline"
+              onClick={() => setQuickCreateOpen(true)}
+              className="h-12 w-full text-base"
+            >
+              <Sparkles className="mr-2 h-4 w-4" />
+              Quick Create from concept
+            </Button>
           </div>
         </div>
       </main>
+      <QuickCreateDialog open={quickCreateOpen} onOpenChange={setQuickCreateOpen} />
     </div>
   );
 }

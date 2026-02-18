@@ -2,11 +2,12 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { Plus, Film, Clock, Clapperboard } from "lucide-react";
+import { Plus, Film, Clock, Clapperboard, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Header } from "@/components/layout/Header";
+import { QuickCreateDialog } from "@/components/movie/QuickCreateDialog";
 
 interface MovieSummary {
   id: string;
@@ -61,6 +62,7 @@ function formatTimeAgo(dateStr: string): string {
 export default function MoviesPage() {
   // TODO: Fetch from API with SWR/React Query
   const [movies] = useState<MovieSummary[]>([]);
+  const [quickCreateOpen, setQuickCreateOpen] = useState(false);
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -74,12 +76,18 @@ export default function MoviesPage() {
                 Create and manage your AI film projects
               </p>
             </div>
-            <Button asChild>
-              <Link href="/movies/new">
-                <Plus className="mr-2 h-4 w-4" />
-                New Movie
-              </Link>
-            </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setQuickCreateOpen(true)}>
+                <Sparkles className="mr-2 h-4 w-4" />
+                Quick Create
+              </Button>
+              <Button asChild>
+                <Link href="/movies/new">
+                  <Plus className="mr-2 h-4 w-4" />
+                  New Movie
+                </Link>
+              </Button>
+            </div>
           </div>
 
           {movies.length === 0 ? (
@@ -94,12 +102,18 @@ export default function MoviesPage() {
                 Describe your movie idea and let the AI Director help you plan
                 every shot, choose camera angles, and build your short film.
               </p>
-              <Button asChild>
-                <Link href="/movies/new">
-                  <Plus className="mr-2 h-4 w-4" />
-                  Start creating
-                </Link>
-              </Button>
+              <div className="flex gap-3">
+                <Button variant="outline" onClick={() => setQuickCreateOpen(true)}>
+                  <Sparkles className="mr-2 h-4 w-4" />
+                  Quick Create
+                </Button>
+                <Button asChild>
+                  <Link href="/movies/new">
+                    <Plus className="mr-2 h-4 w-4" />
+                    Start creating
+                  </Link>
+                </Button>
+              </div>
             </div>
           ) : (
             <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -154,6 +168,7 @@ export default function MoviesPage() {
           )}
         </div>
       </main>
+      <QuickCreateDialog open={quickCreateOpen} onOpenChange={setQuickCreateOpen} />
     </div>
   );
 }
