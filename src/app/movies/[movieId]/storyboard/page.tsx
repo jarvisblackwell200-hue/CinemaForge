@@ -14,6 +14,7 @@ import {
   AlertTriangle,
   Camera,
   Trash2,
+  Pencil,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -101,6 +102,7 @@ interface ShotData {
   durationSeconds: number;
   generatedPrompt?: string | null;
   negativePrompt?: string | null;
+  storyboardImageUrl?: string | null;
   status?: string;
   takes?: {
     id: string;
@@ -123,6 +125,7 @@ interface CharacterData {
   id: string;
   name: string;
   visualDescription: string;
+  referenceImages: string[];
 }
 
 // ─── Component ──────────────────────────────────────────────────
@@ -152,6 +155,10 @@ export default function StoryboardPage() {
   const [promptPreviewShot, setPromptPreviewShot] = useState<number | null>(
     null
   );
+  const [sketchGenerating, setSketchGenerating] = useState<Set<number>>(
+    new Set()
+  );
+  const [generatingAllSketches, setGeneratingAllSketches] = useState(false);
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -452,6 +459,142 @@ export default function StoryboardPage() {
     }
   }
 
+  // ─── Sketch generation ────────────────────────────────────
+
+  async function generateSketch(index: number) {
+    const shot = shots[index];
+    if (!shot?.subject && !shot?.action) return;
+
+    setSketchGenerating((prev) => new Set(prev).add(index));
+
+    try {
+      // Re-fetch characters to get the latest reference images
+      // (user may have added images on the characters page after storyboard loaded)
+      let latestCharacters = characters;
+      try {
+        const charRes = await fetch(`/api/characters?movieId=${params.movieId}`);
+        if (charRes.ok) {
+          const charData = await charRes.json();
+          if (charData.success) {
+            latestCharacters = charData.data;
+            setCharacters(charData.data);
+          }
+        }
+      } catch {
+        // Fall back to cached characters
+      }
+
+      // Find characters mentioned in this shot's subject/action
+      const shotText = `${shot.subject} ${shot.action}`.toLowerCase();
+      const matchedCharacters = latestCharacters.filter(
+        (c: CharacterData) => shotText.includes(c.name.toLowerCase())
+      );
+
+      // Check if any matched character has a reference image
+      let referenceImageUrl: string | undefined;
+      for (const c of matchedCharacters) {
+        if (c.referenceImages && c.referenceImages.length > 0) {
+          referenceImageUrl = c.referenceImages[0];
+          break;
+        }
+      }
+
+      // If no name-matched character had images, check all characters for images
+      // (covers cases where shot text uses a nickname or abbreviation)
+      if (!referenceImageUrl) {
+        for (const c of latestCharacters) {
+          if (c.referenceImages && c.referenceImages.length > 0) {
+            referenceImageUrl = c.referenceImages[0];
+            break;
+          }
+        }
+      }
+
+      // Build a clean prompt without duplications
+      const promptParts: string[] = [];
+
+      // Camera — use cameraMovement (already includes shot type info)
+      if (shot.cameraMovement) {
+        promptParts.push(shot.cameraMovement);
+      } else if (shot.shotType) {
+        promptParts.push(`${shot.shotType} shot`);
+      }
+
+      // Characters — only add text descriptions when there's NO reference image
+      // (the image itself is the source of truth for appearance)
+      if (!referenceImageUrl && matchedCharacters.length > 0) {
+        const charDescs = matchedCharacters
+          .map((c) => `${c.name}: ${c.visualDescription}`)
+          .join(". ");
+        promptParts.push(charDescs);
+      }
+
+      // Subject & action — avoid adding action if it's the same as subject
+      if (shot.subject) promptParts.push(shot.subject);
+      if (shot.action && shot.action !== shot.subject) {
+        promptParts.push(shot.action);
+      }
+
+      if (shot.environment) promptParts.push(shot.environment);
+      if (shot.lighting) promptParts.push(shot.lighting);
+
+      const res = await fetch("/api/ai/generate-image", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: promptParts.join(". "),
+          style: "sketch",
+          aspectRatio: "landscape_4_3",
+          referenceImageUrl,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && data.data?.imageUrl) {
+          const imageUrl = data.data.imageUrl;
+
+          // Update local state
+          setShots((prev) =>
+            prev.map((s, i) =>
+              i === index ? { ...s, storyboardImageUrl: imageUrl } : s
+            )
+          );
+
+          // Persist to DB
+          if (shot.id) {
+            await fetch(`/api/shots/${shot.id}`, {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ storyboardImageUrl: imageUrl }),
+            });
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Failed to generate sketch:", error);
+    } finally {
+      setSketchGenerating((prev) => {
+        const next = new Set(prev);
+        next.delete(index);
+        return next;
+      });
+    }
+  }
+
+  async function generateAllSketches() {
+    setGeneratingAllSketches(true);
+    try {
+      for (let i = 0; i < shots.length; i++) {
+        if (!shots[i].storyboardImageUrl && (shots[i].subject || shots[i].action)) {
+          await generateSketch(i);
+        }
+      }
+    } finally {
+      setGeneratingAllSketches(false);
+    }
+  }
+
   // ─── Proceed to Generate ───────────────────────────────────
 
   async function handleContinue() {
@@ -569,6 +712,27 @@ export default function StoryboardPage() {
               <Clock className="h-3.5 w-3.5" />
               {totalDuration}s total
             </div>
+
+            {shots.length > 0 && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={generateAllSketches}
+                disabled={generatingAllSketches || shots.every((s) => !!s.storyboardImageUrl)}
+              >
+                {generatingAllSketches ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <Pencil className="mr-1.5 h-3.5 w-3.5" />
+                    Generate All Sketches
+                  </>
+                )}
+              </Button>
+            )}
 
             <Button
               size="sm"
@@ -733,6 +897,12 @@ export default function StoryboardPage() {
                           onRequestSuggestion={() =>
                             requestSuggestion(originalIndex)
                           }
+                          onGenerateSketch={() =>
+                            generateSketch(originalIndex)
+                          }
+                          isGeneratingSketch={sketchGenerating.has(
+                            originalIndex
+                          )}
                           genre={movie?.genre}
                         />
 

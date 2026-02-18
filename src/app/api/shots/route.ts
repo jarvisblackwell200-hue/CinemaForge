@@ -24,6 +24,7 @@ const CreateShotSchema = z.object({
   durationSeconds: z.number().int().min(3).max(15).optional(),
   generatedPrompt: z.string().nullish(),
   negativePrompt: z.string().nullish(),
+  storyboardImageUrl: z.string().nullish(),
   status: z.string().optional(),
 });
 
