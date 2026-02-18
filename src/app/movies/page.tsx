@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { Plus, Film, Clock, Clapperboard, Sparkles } from "lucide-react";
+import { Plus, Film, Clock, Clapperboard, Sparkles, Loader2, AlertCircle, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -60,9 +60,32 @@ function formatTimeAgo(dateStr: string): string {
 }
 
 export default function MoviesPage() {
-  // TODO: Fetch from API with SWR/React Query
-  const [movies] = useState<MovieSummary[]>([]);
+  const [movies, setMovies] = useState<MovieSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [quickCreateOpen, setQuickCreateOpen] = useState(false);
+
+  const fetchMovies = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/movies");
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        setError(json.error ?? "Failed to load movies");
+        return;
+      }
+      setMovies(json.data);
+    } catch {
+      setError("Failed to connect to server");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchMovies();
+  }, [fetchMovies]);
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -90,7 +113,21 @@ export default function MoviesPage() {
             </div>
           </div>
 
-          {movies.length === 0 ? (
+          {loading ? (
+            <div className="flex flex-col items-center justify-center py-24">
+              <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+              <p className="mt-4 text-sm text-muted-foreground">Loading your movies...</p>
+            </div>
+          ) : error ? (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-destructive/30 py-24">
+              <AlertCircle className="h-8 w-8 text-destructive" />
+              <p className="mt-4 text-sm text-destructive">{error}</p>
+              <Button variant="outline" size="sm" className="mt-4" onClick={fetchMovies}>
+                <RefreshCw className="mr-2 h-3 w-3" />
+                Retry
+              </Button>
+            </div>
+          ) : movies.length === 0 ? (
             <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-24">
               <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
                 <Clapperboard className="h-8 w-8 text-primary" />
@@ -168,7 +205,10 @@ export default function MoviesPage() {
           )}
         </div>
       </main>
-      <QuickCreateDialog open={quickCreateOpen} onOpenChange={setQuickCreateOpen} />
+      <QuickCreateDialog open={quickCreateOpen} onOpenChange={(open) => {
+        setQuickCreateOpen(open);
+        if (!open) fetchMovies();
+      }} />
     </div>
   );
 }

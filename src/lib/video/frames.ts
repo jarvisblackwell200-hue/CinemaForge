@@ -27,46 +27,116 @@
  * as the start_image_url for shot N, so Kling carries visual DNA
  * between shots.
  *
- * Approach: Use fal.ai's frame extraction or fall back to ffmpeg.
- * In dry-run mode, returns a placeholder image URL.
+ * Approach: Use ffmpeg via child_process for frame extraction.
+ * Extracted frames are uploaded to Supabase storage and a public URL is returned.
  */
 
-const DRY_RUN = process.env.KLING_DRY_RUN !== "false";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { createClient } from "@supabase/supabase-js";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { readFile, unlink } from "node:fs/promises";
 
-const PLACEHOLDER_FRAME_URL =
-  "https://fal.media/files/elephant/OEbhPGhwTQMGOgVOGGJjH_image.webp";
+const execFileAsync = promisify(execFile);
+
+const FRAME_BUCKET = "reference-images";
+
+function getSupabase() {
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SECRET_KEY ?? process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error("Supabase not configured");
+  return createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
+
+/**
+ * Get the duration of a video in seconds using ffprobe.
+ */
+export async function getVideoDuration(videoUrl: string): Promise<number> {
+  const { stdout } = await execFileAsync("ffprobe", [
+    "-v", "quiet",
+    "-print_format", "json",
+    "-show_format",
+    videoUrl,
+  ], { timeout: 30_000 });
+
+  const info = JSON.parse(stdout);
+  return parseFloat(info.format?.duration ?? "0");
+}
+
+/**
+ * Extract a single frame from a video at a given time offset.
+ * Returns the frame as a JPEG Buffer.
+ */
+async function extractFrameAt(
+  videoUrl: string,
+  seekSeconds: number,
+): Promise<Buffer> {
+  const outPath = join(tmpdir(), `cinemaforge-frame-${crypto.randomUUID()}.jpg`);
+
+  try {
+    await execFileAsync("ffmpeg", [
+      "-ss", String(Math.max(0, seekSeconds)),
+      "-i", videoUrl,
+      "-frames:v", "1",
+      "-q:v", "2",
+      "-y",
+      outPath,
+    ], { timeout: 30_000 });
+
+    return await readFile(outPath);
+  } finally {
+    // Clean up temp file
+    await unlink(outPath).catch(() => {});
+  }
+}
+
+/**
+ * Upload a JPEG buffer to Supabase storage and return its public URL.
+ */
+async function uploadFrame(buffer: Buffer, prefix: string): Promise<string> {
+  const supabase = getSupabase();
+  const path = `frames/${prefix}/${crypto.randomUUID()}.jpg`;
+
+  const { error } = await supabase.storage
+    .from(FRAME_BUCKET)
+    .upload(path, buffer, {
+      contentType: "image/jpeg",
+      upsert: false,
+    });
+
+  if (error) {
+    throw new Error(`Failed to upload frame: ${error.message}`);
+  }
+
+  const { data } = supabase.storage.from(FRAME_BUCKET).getPublicUrl(path);
+  return data.publicUrl;
+}
 
 /**
  * Extract the last frame from a video URL.
- *
- * For now uses a server-side fetch + ffmpeg approach.
- * Falls back to placeholder in dry-run mode.
+ * Uses ffprobe to find duration, then seeks near the end.
+ * Returns a public URL of the uploaded frame, or null on failure.
  */
 export async function extractLastFrame(
-  videoUrl: string
+  videoUrl: string,
 ): Promise<string | null> {
-  if (DRY_RUN) {
-    return PLACEHOLDER_FRAME_URL;
-  }
-
   try {
-    // Use fal.ai's video-to-image endpoint if available,
-    // otherwise fall back to returning null (skip chaining)
-    //
-    // For production: implement ffmpeg frame extraction on the worker,
-    // or use a video processing API. The extracted frame should be
-    // uploaded to R2 and its URL stored on the shot's endFrameUrl field.
-    //
-    // Simplified approach for MVP: use the video URL itself.
-    // Some video models accept video URLs as image references,
-    // but Kling specifically needs a still image.
-    //
-    // TODO: Implement proper frame extraction with ffmpeg:
-    // ffmpeg -sseof -0.1 -i <video_url> -frames:v 1 -q:v 2 frame.jpg
+    const duration = await getVideoDuration(videoUrl);
+    if (duration <= 0) {
+      console.warn("[frames] Could not determine video duration");
+      return null;
+    }
 
-    return null; // Skip chaining until ffmpeg is available
+    // Seek to 0.1s before the end
+    const seekTime = Math.max(0, duration - 0.1);
+    const buffer = await extractFrameAt(videoUrl, seekTime);
+
+    return await uploadFrame(buffer, "last");
   } catch (error) {
-    console.error("Frame extraction failed:", error);
+    console.error("[frames] Last frame extraction failed:", error);
     return null;
   }
 }
@@ -74,20 +144,16 @@ export async function extractLastFrame(
 /**
  * Extract the first frame from a video URL.
  * Useful for generating thumbnails.
+ * Returns a public URL of the uploaded frame, or null on failure.
  */
 export async function extractFirstFrame(
-  videoUrl: string
+  videoUrl: string,
 ): Promise<string | null> {
-  if (DRY_RUN) {
-    return PLACEHOLDER_FRAME_URL;
-  }
-
   try {
-    // TODO: Implement with ffmpeg
-    // ffmpeg -i <video_url> -frames:v 1 -q:v 2 frame.jpg
-    return null;
+    const buffer = await extractFrameAt(videoUrl, 0);
+    return await uploadFrame(buffer, "first");
   } catch (error) {
-    console.error("Frame extraction failed:", error);
+    console.error("[frames] First frame extraction failed:", error);
     return null;
   }
 }

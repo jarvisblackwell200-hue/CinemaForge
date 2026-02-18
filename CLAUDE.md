@@ -889,3 +889,4 @@ These rules are derived from extensive testing and must be enforced by the promp
 - Every generation costs the user real credits — always confirm before spending, show estimated cost, and provide refunds on failures
 - The prompt assembly engine should produce prompts that a filmmaker would recognize as well-structured scene directions
 - Keep the free tier genuinely useful — 50 credits = ~3 draft shots or 1 standard shot, enough to understand the product
+
