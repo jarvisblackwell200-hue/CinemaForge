@@ -3,24 +3,32 @@ import { z } from "zod/v4";
 import { db } from "@/lib/db";
 import { ensureUser } from "@/lib/auth";
 
-const CreateCharacterSchema = z.object({
-  movieId: z.string(),
-  name: z.string().min(1, "Name is required"),
-  role: z.enum(["protagonist", "antagonist", "supporting", "background"]).optional(),
-  visualDescription: z
-    .string()
-    .min(20, "Visual description must be at least 20 characters for consistent generation"),
-  referenceImages: z.array(z.string()).optional(),
-  voiceProfile: z
-    .object({
-      language: z.string(),
-      accent: z.string(),
-      tone: z.string(),
-      speed: z.enum(["slow", "normal", "fast"]),
-    })
-    .optional(),
-  styleBibleEntry: z.string().optional(),
-});
+const CreateCharacterSchema = z
+  .object({
+    movieId: z.string(),
+    name: z.string().min(1, "Name is required"),
+    role: z.enum(["protagonist", "antagonist", "supporting", "background"]).optional(),
+    visualDescription: z.string().min(1, "Visual description is required"),
+    referenceImages: z.array(z.string()).optional(),
+    voiceProfile: z
+      .object({
+        language: z.string(),
+        accent: z.string(),
+        tone: z.string(),
+        speed: z.enum(["slow", "normal", "fast"]),
+      })
+      .optional(),
+    styleBibleEntry: z.string().optional(),
+  })
+  .refine(
+    (data) =>
+      (data.referenceImages && data.referenceImages.length > 0) ||
+      data.visualDescription.length >= 20,
+    {
+      message: "Visual description must be at least 20 characters when no reference images are provided",
+      path: ["visualDescription"],
+    }
+  );
 
 export async function POST(req: Request) {
   try {
@@ -107,6 +115,59 @@ export async function GET(req: Request) {
     return NextResponse.json({ success: true, data: characters });
   } catch (error) {
     console.error("Failed to list characters:", error);
+    return NextResponse.json(
+      { success: false, error: "Internal server error" },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(req: Request) {
+  try {
+    const userId = await ensureUser();
+
+    const url = new URL(req.url);
+    const id = url.searchParams.get("id");
+    const movieId = url.searchParams.get("movieId");
+
+    if (!id || !movieId) {
+      return NextResponse.json(
+        { success: false, error: "id and movieId are required" },
+        { status: 400 }
+      );
+    }
+
+    // Verify movie ownership
+    const movie = await db.movie.findFirst({
+      where: { id: movieId, userId },
+      select: { id: true },
+    });
+
+    if (!movie) {
+      return NextResponse.json(
+        { success: false, error: "Movie not found" },
+        { status: 404 }
+      );
+    }
+
+    // Verify character belongs to this movie
+    const character = await db.character.findFirst({
+      where: { id, movieId },
+      select: { id: true },
+    });
+
+    if (!character) {
+      return NextResponse.json(
+        { success: false, error: "Character not found" },
+        { status: 404 }
+      );
+    }
+
+    await db.character.delete({ where: { id } });
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error("Failed to delete character:", error);
     return NextResponse.json(
       { success: false, error: "Internal server error" },
       { status: 500 }

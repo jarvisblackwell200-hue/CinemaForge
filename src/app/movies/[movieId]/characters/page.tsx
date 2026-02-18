@@ -49,6 +49,7 @@ export default function CharactersPage() {
 
   // Wizard dialog state
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<Character | null>(null);
 
   // Delete confirmation state
   const [deleteTarget, setDeleteTarget] = useState<Character | null>(null);
@@ -112,12 +113,35 @@ export default function CharactersPage() {
   };
 
   // -------------------------------------------------------------------------
-  // Wizard complete handler
+  // Wizard handlers
   // -------------------------------------------------------------------------
 
-  const handleWizardComplete = (character: Character) => {
-    setCharacters((prev) => [...prev, character]);
+  const openCreateWizard = () => {
+    setEditTarget(null);
+    setWizardOpen(true);
+  };
+
+  const openEditWizard = (character: Character) => {
+    setEditTarget(character);
+    setWizardOpen(true);
+  };
+
+  const closeWizard = () => {
     setWizardOpen(false);
+    setEditTarget(null);
+  };
+
+  const handleWizardComplete = (character: Character) => {
+    if (editTarget) {
+      // Update existing character in place
+      setCharacters((prev) =>
+        prev.map((c) => (c.id === character.id ? character : c))
+      );
+    } else {
+      // Append new character
+      setCharacters((prev) => [...prev, character]);
+    }
+    closeWizard();
   };
 
   // -------------------------------------------------------------------------
@@ -167,7 +191,7 @@ export default function CharactersPage() {
               : `${characters.length} character${characters.length !== 1 ? "s" : ""} defined`}
           </p>
         </div>
-        <Button onClick={() => setWizardOpen(true)}>
+        <Button onClick={openCreateWizard}>
           <Plus className="mr-2 h-4 w-4" />
           Add Character
         </Button>
@@ -187,7 +211,7 @@ export default function CharactersPage() {
               reference images. Consistency starts here -- the more detail you
               provide, the better your characters will look across every shot.
             </p>
-            <Button onClick={() => setWizardOpen(true)} className="mt-2">
+            <Button onClick={openCreateWizard} className="mt-2">
               <Plus className="mr-2 h-4 w-4" />
               Add your first character
             </Button>
@@ -199,10 +223,7 @@ export default function CharactersPage() {
               <CharacterCard
                 key={character.id}
                 character={character}
-                onEdit={() => {
-                  // For now, edit reopens the wizard -- full edit flow can be
-                  // added later when the wizard supports editing mode.
-                }}
+                onEdit={() => openEditWizard(character)}
                 onDelete={() => setDeleteTarget(character)}
               />
             ))}
@@ -210,7 +231,7 @@ export default function CharactersPage() {
             {/* Add card */}
             <button
               type="button"
-              onClick={() => setWizardOpen(true)}
+              onClick={openCreateWizard}
               className="flex min-h-[200px] flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
             >
               <Plus className="h-6 w-6" />
@@ -221,21 +242,34 @@ export default function CharactersPage() {
       </div>
 
       {/* Character Wizard Dialog */}
-      <Dialog open={wizardOpen} onOpenChange={setWizardOpen}>
+      <Dialog open={wizardOpen} onOpenChange={(open) => { if (!open) closeWizard(); }}>
         <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Users className="h-5 w-5 text-primary" />
-              Create Character
+              {editTarget ? "Edit Character" : "Create Character"}
             </DialogTitle>
             <DialogDescription>
-              Build a detailed character profile for consistent AI generation.
+              {editTarget
+                ? "Update this character's profile and reference images."
+                : "Build a detailed character profile for consistent AI generation."}
             </DialogDescription>
           </DialogHeader>
           <CharacterWizard
             movieId={movieId}
             onComplete={handleWizardComplete}
-            onCancel={() => setWizardOpen(false)}
+            onCancel={closeWizard}
+            editCharacter={
+              editTarget
+                ? {
+                    id: editTarget.id,
+                    name: editTarget.name,
+                    role: editTarget.role,
+                    visualDescription: editTarget.visualDescription,
+                    referenceImages: editTarget.referenceImages,
+                  }
+                : undefined
+            }
           />
         </DialogContent>
       </Dialog>

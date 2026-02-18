@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useCallback } from "react";
+import { useState, useMemo, useCallback, useRef } from "react";
 import {
   Users,
   ChevronRight,
@@ -10,10 +10,12 @@ import {
   Sparkles,
   Loader2,
   ImageIcon,
-  RefreshCw,
+  Upload,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -31,6 +33,14 @@ interface CreatedCharacter {
   createdAt: string;
 }
 
+interface EditCharacterData {
+  id: string;
+  name: string;
+  role: string | null;
+  visualDescription: string;
+  referenceImages: string[];
+}
+
 interface CharacterWizardProps {
   movieId: string;
   onComplete: (character: CreatedCharacter) => void;
@@ -40,6 +50,7 @@ interface CharacterWizardProps {
     role: string;
     suggestedVisualDescription: string;
   };
+  editCharacter?: EditCharacterData;
 }
 
 type Role = "protagonist" | "antagonist" | "supporting" | "background";
@@ -70,6 +81,7 @@ interface FormFields {
   facialHair: FacialHair | "";
   clothing: string;
   distinguishingFeatures: string;
+  manualDescription: string; // free-text description when skipping form
 }
 
 // ---------------------------------------------------------------------------
@@ -84,29 +96,16 @@ const ROLES: { value: Role; label: string; description: string }[] = [
 ];
 
 const AGE_RANGES: AgeRange[] = ["child", "teen", "20s", "30s", "40s", "50s", "60s+"];
-
 const GENDERS: Gender[] = ["male", "female", "non-binary"];
-
 const BUILDS: Build[] = ["slim", "average", "athletic", "stocky", "heavy"];
 
 const HAIR_STYLES: HairStyle[] = [
-  "short cropped",
-  "medium length",
-  "long straight",
-  "long wavy",
-  "curly",
-  "buzz cut",
-  "bald",
-  "ponytail",
-  "braids",
+  "short cropped", "medium length", "long straight", "long wavy",
+  "curly", "buzz cut", "bald", "ponytail", "braids",
 ];
 
 const FACIAL_HAIR_OPTIONS: FacialHair[] = [
-  "none",
-  "stubble",
-  "beard",
-  "mustache",
-  "goatee",
+  "none", "stubble", "beard", "mustache", "goatee",
 ];
 
 const STEPS = [
@@ -114,6 +113,45 @@ const STEPS = [
   { id: 2, label: "Appearance", description: "Visual details" },
   { id: 3, label: "Preview", description: "Review & create" },
 ] as const;
+
+// ---------------------------------------------------------------------------
+// Helper: parse visual description back into form fields (best-effort)
+// ---------------------------------------------------------------------------
+
+function parseVisualDescription(desc: string): Partial<FormFields> {
+  const result: Partial<FormFields> = {};
+  const lower = desc.toLowerCase();
+
+  for (const age of AGE_RANGES) {
+    if (lower.includes(age)) { result.ageRange = age; break; }
+  }
+  for (const g of GENDERS) {
+    if (lower.includes(g)) { result.gender = g; break; }
+  }
+  for (const b of BUILDS) {
+    if (lower.includes(`${b} build`)) { result.build = b; break; }
+  }
+  for (const hs of HAIR_STYLES) {
+    if (lower.includes(`${hs} hair`) || lower.includes(hs)) { result.hairStyle = hs; break; }
+  }
+  for (const fh of FACIAL_HAIR_OPTIONS) {
+    if (fh !== "none" && lower.includes(`${fh} facial hair`)) { result.facialHair = fh; break; }
+  }
+  const skinMatch = lower.match(/(\w[\w\s]*?)\s+skin/);
+  if (skinMatch) result.skinTone = skinMatch[1].trim();
+  const hairColorMatch = lower.match(
+    /(\w+)\s+(?:short cropped|medium length|long straight|long wavy|curly|buzz cut|ponytail|braids|)\s*hair/
+  );
+  if (hairColorMatch?.[1]) {
+    const candidate = hairColorMatch[1].trim();
+    const styleWords = new Set(HAIR_STYLES.flatMap((s) => s.split(" ")));
+    if (!styleWords.has(candidate)) result.hairColor = candidate;
+  }
+  const clothingMatch = desc.match(/wearing\s+(.+?)(?:\.|,\s*[a-z])/i);
+  if (clothingMatch) result.clothing = clothingMatch[1].trim();
+
+  return result;
+}
 
 // ---------------------------------------------------------------------------
 // Helper: option picker button
@@ -143,17 +181,7 @@ function OptionButton({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Helper: field label
-// ---------------------------------------------------------------------------
-
-function FieldLabel({
-  children,
-  required,
-}: {
-  children: React.ReactNode;
-  required?: boolean;
-}) {
+function FieldLabel({ children, required }: { children: React.ReactNode; required?: boolean }) {
   return (
     <label className="mb-1.5 block text-sm font-medium text-foreground">
       {children}
@@ -171,26 +199,55 @@ export function CharacterWizard({
   onComplete,
   onCancel,
   initialData,
+  editCharacter,
 }: CharacterWizardProps) {
+  const isEditing = !!editCharacter;
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
   const [step, setStep] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [referenceImageUrl, setReferenceImageUrl] = useState<string | null>(null);
+  const [referenceImages, setReferenceImages] = useState<string[]>(
+    () => editCharacter?.referenceImages ?? []
+  );
   const [generatingImage, setGeneratingImage] = useState(false);
+  const [uploading, setUploading] = useState(false);
 
-  const [fields, setFields] = useState<FormFields>(() => ({
-    name: initialData?.name ?? "",
-    role: (initialData?.role as Role) ?? "",
-    ageRange: "",
-    gender: "",
-    build: "",
-    skinTone: "",
-    hairColor: "",
-    hairStyle: "",
-    facialHair: "",
-    clothing: "",
-    distinguishingFeatures: "",
-  }));
+  const [fields, setFields] = useState<FormFields>(() => {
+    if (editCharacter) {
+      const parsed = parseVisualDescription(editCharacter.visualDescription);
+      const hasFormFields = parsed.ageRange || parsed.gender || parsed.build;
+      return {
+        name: editCharacter.name,
+        role: (editCharacter.role as Role) ?? "",
+        ageRange: parsed.ageRange ?? "",
+        gender: parsed.gender ?? "",
+        build: parsed.build ?? "",
+        skinTone: parsed.skinTone ?? "",
+        hairColor: parsed.hairColor ?? "",
+        hairStyle: parsed.hairStyle ?? "",
+        facialHair: parsed.facialHair ?? "",
+        clothing: parsed.clothing ?? "",
+        distinguishingFeatures: "",
+        manualDescription: hasFormFields ? "" : editCharacter.visualDescription,
+      };
+    }
+
+    return {
+      name: initialData?.name ?? "",
+      role: (initialData?.role as Role) ?? "",
+      ageRange: "",
+      gender: "",
+      build: "",
+      skinTone: "",
+      hairColor: "",
+      hairStyle: "",
+      facialHair: "",
+      clothing: "",
+      distinguishingFeatures: "",
+      manualDescription: "",
+    };
+  });
 
   const updateField = useCallback(
     <K extends keyof FormFields>(key: K, value: FormFields[K]) => {
@@ -199,60 +256,43 @@ export function CharacterWizard({
     []
   );
 
+  // Whether the user has a reference image (can skip appearance form)
+  const hasRefImage = referenceImages.length > 0;
+
   // -----------------------------------------------------------------------
-  // Assembled visual description
+  // Assembled visual description (from form fields)
   // -----------------------------------------------------------------------
 
-  const visualDescription = useMemo(() => {
+  const formVisualDescription = useMemo(() => {
     const parts: string[] = [];
+    const { ageRange: age, gender, build } = fields;
 
-    const age = fields.ageRange;
-    const gender = fields.gender;
-    const build = fields.build;
-
-    // "A [age] [gender] with a [build] build"
     if (age || gender || build) {
       let intro = "A";
-      if (age) intro += ` ${age === "60s+" ? "60s+" : age}`;
+      if (age) intro += ` ${age}`;
       if (gender) intro += ` ${gender}`;
       if (build) intro += ` with a ${build} build`;
       parts.push(intro);
     }
-
-    // "skin tone skin"
-    if (fields.skinTone.trim()) {
-      parts.push(`${fields.skinTone.trim()} skin`);
-    }
-
-    // "hair color hair style hair"
+    if (fields.skinTone.trim()) parts.push(`${fields.skinTone.trim()} skin`);
     if (fields.hairColor.trim() || fields.hairStyle) {
-      const hairParts: string[] = [];
-      if (fields.hairColor.trim()) hairParts.push(fields.hairColor.trim());
-      if (fields.hairStyle) hairParts.push(fields.hairStyle);
-      hairParts.push("hair");
-      parts.push(hairParts.join(" "));
+      const hp: string[] = [];
+      if (fields.hairColor.trim()) hp.push(fields.hairColor.trim());
+      if (fields.hairStyle) hp.push(fields.hairStyle);
+      hp.push("hair");
+      parts.push(hp.join(" "));
     }
-
-    // facial hair (skip "none")
     if (fields.facialHair && fields.facialHair !== "none") {
       parts.push(`${fields.facialHair} facial hair`);
     }
+    if (fields.clothing.trim()) parts.push(`wearing ${fields.clothing.trim()}`);
+    if (fields.distinguishingFeatures.trim()) parts.push(fields.distinguishingFeatures.trim());
 
-    // clothing
-    if (fields.clothing.trim()) {
-      parts.push(`wearing ${fields.clothing.trim()}`);
-    }
-
-    // distinguishing features
-    if (fields.distinguishingFeatures.trim()) {
-      parts.push(fields.distinguishingFeatures.trim());
-    }
-
-    if (parts.length === 0) return "";
-
-    // Join with commas and finish with a period
-    return parts.join(", ") + ".";
+    return parts.length > 0 ? parts.join(", ") + "." : "";
   }, [fields]);
+
+  // Final description: use form fields if filled, otherwise manual text
+  const visualDescription = formVisualDescription || fields.manualDescription.trim();
 
   // -----------------------------------------------------------------------
   // Consistency score
@@ -264,45 +304,16 @@ export function CharacterWizard({
     warning: string;
   }
 
-  const consistencyItems = useMemo<ConsistencyItem[]>(() => {
-    return [
-      {
-        field: "Age range",
-        filled: fields.ageRange !== "",
-        warning: "Without age range, character age may vary between shots.",
-      },
-      {
-        field: "Gender",
-        filled: fields.gender !== "",
-        warning: "Without gender, character appearance may be inconsistent.",
-      },
-      {
-        field: "Build",
-        filled: fields.build !== "",
-        warning: "Without build, body type may change between shots.",
-      },
-      {
-        field: "Skin tone",
-        filled: fields.skinTone.trim() !== "",
-        warning: "Without skin tone, complexion may vary between shots.",
-      },
-      {
-        field: "Hair color",
-        filled: fields.hairColor.trim() !== "",
-        warning: "Without hair color, character may vary between shots.",
-      },
-      {
-        field: "Hair style",
-        filled: fields.hairStyle !== "",
-        warning: "Without hair style, hairstyle may change between shots.",
-      },
-      {
-        field: "Clothing",
-        filled: fields.clothing.trim() !== "",
-        warning: "Without clothing details, wardrobe may be inconsistent.",
-      },
-    ];
-  }, [fields]);
+  const consistencyItems = useMemo<ConsistencyItem[]>(() => [
+    { field: "Age range", filled: fields.ageRange !== "", warning: "Without age range, character age may vary between shots." },
+    { field: "Gender", filled: fields.gender !== "", warning: "Without gender, character appearance may be inconsistent." },
+    { field: "Build", filled: fields.build !== "", warning: "Without build, body type may change between shots." },
+    { field: "Skin tone", filled: fields.skinTone.trim() !== "", warning: "Without skin tone, complexion may vary between shots." },
+    { field: "Hair color", filled: fields.hairColor.trim() !== "", warning: "Without hair color, character may vary between shots." },
+    { field: "Hair style", filled: fields.hairStyle !== "", warning: "Without hair style, hairstyle may change between shots." },
+    { field: "Clothing", filled: fields.clothing.trim() !== "", warning: "Without clothing details, wardrobe may be inconsistent." },
+    { field: "Reference image", filled: hasRefImage, warning: "A reference image greatly improves character consistency." },
+  ], [fields, hasRefImage]);
 
   const consistencyScore = useMemo(() => {
     const filled = consistencyItems.filter((i) => i.filled).length;
@@ -314,30 +325,63 @@ export function CharacterWizard({
   // -----------------------------------------------------------------------
 
   const canAdvance = useMemo(() => {
-    if (step === 1) {
-      return fields.name.trim().length > 0 && fields.role !== "";
-    }
+    if (step === 1) return fields.name.trim().length > 0 && fields.role !== "";
     if (step === 2) {
-      // At minimum require age, gender, build for decent consistency
-      return (
-        fields.ageRange !== "" &&
-        fields.gender !== "" &&
-        fields.build !== ""
-      );
+      // If they have a ref image, appearance fields are optional
+      if (hasRefImage) return true;
+      return fields.ageRange !== "" && fields.gender !== "" && fields.build !== "";
     }
     return true;
-  }, [step, fields]);
+  }, [step, fields, hasRefImage]);
 
   // -----------------------------------------------------------------------
-  // Submit
+  // Upload reference image
   // -----------------------------------------------------------------------
+
+  const handleFileUpload = async (file: File) => {
+    if (!file.type.startsWith("image/")) {
+      setError("Please upload an image file (JPEG, PNG, WebP, or GIF)");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setError("Image must be under 10 MB");
+      return;
+    }
+
+    setUploading(true);
+    setError(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+
+      const res = await fetch("/api/upload", { method: "POST", body: formData });
+      const data = await res.json();
+
+      if (data.success) {
+        setReferenceImages((prev) => [...prev, data.data.url]);
+      } else {
+        setError(data.error ?? "Upload failed");
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file) handleFileUpload(file);
+  };
 
   // -----------------------------------------------------------------------
   // Generate reference image
   // -----------------------------------------------------------------------
 
   const generateReferenceImage = async () => {
-    if (visualDescription.length < 20) return;
+    if (visualDescription.length < 10) return;
     setGeneratingImage(true);
     setError(null);
 
@@ -354,7 +398,7 @@ export function CharacterWizard({
 
       const data = await res.json();
       if (data.success) {
-        setReferenceImageUrl(data.data.imageUrl);
+        setReferenceImages((prev) => [...prev, data.data.imageUrl]);
       } else {
         setError(data.error ?? "Failed to generate image");
       }
@@ -365,13 +409,23 @@ export function CharacterWizard({
     }
   };
 
+  const removeReferenceImage = (index: number) => {
+    setReferenceImages((prev) => prev.filter((_, i) => i !== index));
+  };
+
   // -----------------------------------------------------------------------
   // Submit
   // -----------------------------------------------------------------------
 
   const handleSubmit = async () => {
-    if (visualDescription.length < 20) {
-      setError("Visual description is too short. Please fill in more appearance details.");
+    // With a reference image, relax the description requirement
+    const minDesc = hasRefImage ? 1 : 20;
+    if (visualDescription.length < minDesc) {
+      setError(
+        hasRefImage
+          ? "Please add at least a brief description for this character."
+          : "Visual description is too short. Please fill in more appearance details."
+      );
       return;
     }
 
@@ -379,28 +433,42 @@ export function CharacterWizard({
     setError(null);
 
     try {
-      const referenceImages = referenceImageUrl ? [referenceImageUrl] : [];
-
-      const response = await fetch("/api/characters", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          movieId,
-          name: fields.name.trim(),
-          role: fields.role || undefined,
-          visualDescription,
-          referenceImages,
-        }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok || !result.success) {
-        setError(result.error ?? "Failed to create character");
-        return;
+      if (isEditing) {
+        const response = await fetch(`/api/characters/${editCharacter.id}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            name: fields.name.trim(),
+            role: fields.role || undefined,
+            visualDescription,
+            referenceImages,
+          }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          setError(result.error ?? "Failed to update character");
+          return;
+        }
+        onComplete(result.data as CreatedCharacter);
+      } else {
+        const response = await fetch("/api/characters", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            movieId,
+            name: fields.name.trim(),
+            role: fields.role || undefined,
+            visualDescription,
+            referenceImages,
+          }),
+        });
+        const result = await response.json();
+        if (!response.ok || !result.success) {
+          setError(result.error ?? "Failed to create character");
+          return;
+        }
+        onComplete(result.data as CreatedCharacter);
       }
-
-      onComplete(result.data as CreatedCharacter);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Network error");
     } finally {
@@ -419,17 +487,11 @@ export function CharacterWizard({
         {STEPS.map((s, idx) => (
           <div key={s.id} className="flex items-center gap-2">
             {idx > 0 && (
-              <div
-                className={`h-px w-6 ${
-                  step > s.id - 1 ? "bg-primary" : "bg-border"
-                }`}
-              />
+              <div className={`h-px w-6 ${step > s.id - 1 ? "bg-primary" : "bg-border"}`} />
             )}
             <button
               type="button"
-              onClick={() => {
-                if (s.id < step) setStep(s.id);
-              }}
+              onClick={() => { if (s.id < step) setStep(s.id); }}
               disabled={s.id > step}
               className={`flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm transition-colors ${
                 step === s.id
@@ -456,10 +518,23 @@ export function CharacterWizard({
         ))}
       </div>
 
+      {/* Hidden file input — always in DOM so refs work from any step */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0];
+          if (file) handleFileUpload(file);
+          e.target.value = "";
+        }}
+      />
+
       {/* Step content */}
       <div className="min-h-[320px]">
         {/* ----------------------------------------------------------------- */}
-        {/* Step 1: Basics */}
+        {/* Step 1: Basics + optional image upload */}
         {/* ----------------------------------------------------------------- */}
         {step === 1 && (
           <div className="space-y-6">
@@ -502,6 +577,77 @@ export function CharacterWizard({
               </div>
             </div>
 
+            {/* Reference image upload */}
+            <div>
+              <FieldLabel>Reference Image</FieldLabel>
+              {referenceImages.length > 0 ? (
+                <div className="space-y-3">
+                  <div className="flex gap-2 flex-wrap">
+                    {referenceImages.map((url, i) => (
+                      <div
+                        key={i}
+                        className="group/img relative h-20 w-20 overflow-hidden rounded-lg border border-border bg-black"
+                      >
+                        <img
+                          src={url}
+                          alt={`Reference ${i + 1}`}
+                          className="h-full w-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => removeReferenceImage(i)}
+                          className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity group-hover/img:opacity-100 hover:bg-destructive"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={uploading}
+                      className="flex h-20 w-20 items-center justify-center rounded-lg border-2 border-dashed border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
+                    >
+                      {uploading ? (
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                      ) : (
+                        <Upload className="h-5 w-5" />
+                      )}
+                    </button>
+                  </div>
+                  <p className="text-xs text-green-500 flex items-center gap-1">
+                    <Check className="h-3 w-3" />
+                    Reference image added -- you can skip the appearance form
+                  </p>
+                </div>
+              ) : (
+                <div
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={handleDrop}
+                  className="flex flex-col items-center gap-2 rounded-lg border-2 border-dashed border-border py-6 transition-colors hover:border-primary/40"
+                >
+                  {uploading ? (
+                    <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+                  ) : (
+                    <Upload className="h-6 w-6 text-muted-foreground/50" />
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Drag an image here or{" "}
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="text-primary underline underline-offset-2 hover:text-primary/80"
+                    >
+                      browse
+                    </button>
+                  </p>
+                  <p className="text-[10px] text-muted-foreground/60">
+                    Upload a photo to skip the appearance form
+                  </p>
+                </div>
+              )}
+            </div>
+
             {initialData?.suggestedVisualDescription && (
               <Card className="border-primary/20 bg-primary/5">
                 <CardContent className="flex items-start gap-3 pt-0">
@@ -521,6 +667,13 @@ export function CharacterWizard({
                 </CardContent>
               </Card>
             )}
+
+            {error && (
+              <div className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+                <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+                {error}
+              </div>
+            )}
           </div>
         )}
 
@@ -532,61 +685,46 @@ export function CharacterWizard({
             <div>
               <h3 className="text-lg font-semibold">Visual Appearance</h3>
               <p className="mt-1 text-sm text-muted-foreground">
-                These details ensure your character looks consistent across
-                every shot. Fill in as many as possible.
+                {hasRefImage
+                  ? "You have a reference image. These fields are optional but improve consistency."
+                  : "These details ensure your character looks consistent across every shot. Fill in as many as possible."}
               </p>
             </div>
 
             <div className="grid gap-5 sm:grid-cols-2">
-              {/* Age Range */}
               <div>
-                <FieldLabel required>Age Range</FieldLabel>
+                <FieldLabel required={!hasRefImage}>Age Range</FieldLabel>
                 <div className="flex flex-wrap gap-1.5">
                   {AGE_RANGES.map((age) => (
-                    <OptionButton
-                      key={age}
-                      selected={fields.ageRange === age}
-                      onClick={() => updateField("ageRange", age)}
-                    >
+                    <OptionButton key={age} selected={fields.ageRange === age} onClick={() => updateField("ageRange", age)}>
                       {age}
                     </OptionButton>
                   ))}
                 </div>
               </div>
 
-              {/* Gender */}
               <div>
-                <FieldLabel required>Gender</FieldLabel>
+                <FieldLabel required={!hasRefImage}>Gender</FieldLabel>
                 <div className="flex flex-wrap gap-1.5">
                   {GENDERS.map((g) => (
-                    <OptionButton
-                      key={g}
-                      selected={fields.gender === g}
-                      onClick={() => updateField("gender", g)}
-                    >
+                    <OptionButton key={g} selected={fields.gender === g} onClick={() => updateField("gender", g)}>
                       {g}
                     </OptionButton>
                   ))}
                 </div>
               </div>
 
-              {/* Build */}
               <div>
-                <FieldLabel required>Build</FieldLabel>
+                <FieldLabel required={!hasRefImage}>Build</FieldLabel>
                 <div className="flex flex-wrap gap-1.5">
                   {BUILDS.map((b) => (
-                    <OptionButton
-                      key={b}
-                      selected={fields.build === b}
-                      onClick={() => updateField("build", b)}
-                    >
+                    <OptionButton key={b} selected={fields.build === b} onClick={() => updateField("build", b)}>
                       {b}
                     </OptionButton>
                   ))}
                 </div>
               </div>
 
-              {/* Skin Tone */}
               <div>
                 <FieldLabel>Skin Tone</FieldLabel>
                 <Input
@@ -597,7 +735,6 @@ export function CharacterWizard({
                 />
               </div>
 
-              {/* Hair Color */}
               <div>
                 <FieldLabel>Hair Color</FieldLabel>
                 <Input
@@ -608,33 +745,23 @@ export function CharacterWizard({
                 />
               </div>
 
-              {/* Hair Style */}
               <div>
                 <FieldLabel>Hair Style</FieldLabel>
                 <div className="flex flex-wrap gap-1.5">
                   {HAIR_STYLES.map((style) => (
-                    <OptionButton
-                      key={style}
-                      selected={fields.hairStyle === style}
-                      onClick={() => updateField("hairStyle", style)}
-                    >
+                    <OptionButton key={style} selected={fields.hairStyle === style} onClick={() => updateField("hairStyle", style)}>
                       {style}
                     </OptionButton>
                   ))}
                 </div>
               </div>
 
-              {/* Facial Hair (only for male) */}
               {fields.gender === "male" && (
                 <div>
                   <FieldLabel>Facial Hair</FieldLabel>
                   <div className="flex flex-wrap gap-1.5">
                     {FACIAL_HAIR_OPTIONS.map((fh) => (
-                      <OptionButton
-                        key={fh}
-                        selected={fields.facialHair === fh}
-                        onClick={() => updateField("facialHair", fh)}
-                      >
+                      <OptionButton key={fh} selected={fields.facialHair === fh} onClick={() => updateField("facialHair", fh)}>
                         {fh}
                       </OptionButton>
                     ))}
@@ -642,7 +769,6 @@ export function CharacterWizard({
                 </div>
               )}
 
-              {/* Clothing */}
               <div className="sm:col-span-2">
                 <FieldLabel>Clothing</FieldLabel>
                 <Input
@@ -652,14 +778,11 @@ export function CharacterWizard({
                 />
               </div>
 
-              {/* Distinguishing Features */}
               <div className="sm:col-span-2">
                 <FieldLabel>Distinguishing Features</FieldLabel>
                 <Input
                   value={fields.distinguishingFeatures}
-                  onChange={(e) =>
-                    updateField("distinguishingFeatures", e.target.value)
-                  }
+                  onChange={(e) => updateField("distinguishingFeatures", e.target.value)}
                   placeholder="e.g. scar across left eyebrow, wire-rimmed glasses, sleeve tattoo"
                 />
               </div>
@@ -704,51 +827,94 @@ export function CharacterWizard({
                 <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   Visual Description (used in prompts)
                 </p>
-                {visualDescription ? (
-                  <p className="text-sm leading-relaxed">{visualDescription}</p>
+                {formVisualDescription ? (
+                  <p className="text-sm leading-relaxed">{formVisualDescription}</p>
                 ) : (
-                  <p className="text-sm italic text-muted-foreground">
-                    No visual description yet. Go back and fill in appearance
-                    fields.
-                  </p>
+                  <div>
+                    <Textarea
+                      value={fields.manualDescription}
+                      onChange={(e) => updateField("manualDescription", e.target.value)}
+                      placeholder={
+                        hasRefImage
+                          ? "Briefly describe what's not obvious from the image (e.g. clothing, accessories, context)..."
+                          : "Describe this character's appearance..."
+                      }
+                      className="min-h-[80px] resize-none text-sm"
+                    />
+                    {hasRefImage && (
+                      <p className="mt-1.5 text-[10px] text-muted-foreground">
+                        The reference image handles visual identity. Add details only about what changes between shots (clothing, props, etc).
+                      </p>
+                    )}
+                  </div>
                 )}
               </CardContent>
             </Card>
 
-            {/* Reference Image */}
+            {/* Reference Images */}
             <Card className="border-border">
               <CardContent className="pt-0">
                 <p className="mb-3 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                  Reference Image
+                  Reference Images
                 </p>
-                {referenceImageUrl ? (
+                {referenceImages.length > 0 ? (
                   <div className="space-y-3">
-                    <div className="relative overflow-hidden rounded-lg border border-border bg-black">
-                      <img
-                        src={referenceImageUrl}
-                        alt={`${fields.name} reference`}
-                        className="w-full max-h-64 object-contain"
-                      />
+                    <div className="grid grid-cols-3 gap-2">
+                      {referenceImages.map((url, i) => (
+                        <div
+                          key={i}
+                          className="group/img relative overflow-hidden rounded-lg border border-border bg-black"
+                        >
+                          <img
+                            src={url}
+                            alt={`${fields.name} reference ${i + 1}`}
+                            className="w-full aspect-[3/4] object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeReferenceImage(i)}
+                            className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity group-hover/img:opacity-100 hover:bg-destructive"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <Badge variant="outline" className="border-green-500/30 text-green-500 text-[10px]">
                         <Check className="mr-1 h-2.5 w-2.5" />
-                        Generated
+                        {referenceImages.length} image{referenceImages.length !== 1 ? "s" : ""}
                       </Badge>
                       <Button
                         size="sm"
                         variant="ghost"
                         className="h-7 text-xs"
-                        onClick={generateReferenceImage}
-                        disabled={generatingImage}
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploading}
                       >
-                        {generatingImage ? (
+                        {uploading ? (
                           <Loader2 className="mr-1 h-3 w-3 animate-spin" />
                         ) : (
-                          <RefreshCw className="mr-1 h-3 w-3" />
+                          <Upload className="mr-1 h-3 w-3" />
                         )}
-                        Regenerate
+                        Upload Another
                       </Button>
+                      {visualDescription.length >= 10 && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 text-xs"
+                          onClick={generateReferenceImage}
+                          disabled={generatingImage}
+                        >
+                          {generatingImage ? (
+                            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                          ) : (
+                            <Sparkles className="mr-1 h-3 w-3" />
+                          )}
+                          Generate One
+                        </Button>
+                      )}
                     </div>
                   </div>
                 ) : (
@@ -758,24 +924,46 @@ export function CharacterWizard({
                       Generate a reference image to ensure this character looks
                       consistent across all shots.
                     </p>
-                    <Button
-                      size="sm"
-                      variant="secondary"
-                      onClick={generateReferenceImage}
-                      disabled={generatingImage || visualDescription.length < 20}
-                    >
-                      {generatingImage ? (
-                        <>
-                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                          Generating...
-                        </>
-                      ) : (
-                        <>
-                          <Sparkles className="mr-1.5 h-3.5 w-3.5" />
-                          Generate Reference Image
-                        </>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        onClick={() => fileInputRef.current?.click()}
+                        disabled={uploading}
+                      >
+                        {uploading ? (
+                          <>
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                            Uploading...
+                          </>
+                        ) : (
+                          <>
+                            <Upload className="mr-1.5 h-3.5 w-3.5" />
+                            Upload Image
+                          </>
+                        )}
+                      </Button>
+                      {visualDescription.length >= 10 && (
+                        <Button
+                          size="sm"
+                          variant="secondary"
+                          onClick={generateReferenceImage}
+                          disabled={generatingImage}
+                        >
+                          {generatingImage ? (
+                            <>
+                              <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                              Generating...
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                              Generate
+                            </>
+                          )}
+                        </Button>
                       )}
-                    </Button>
+                    </div>
                   </div>
                 )}
               </CardContent>
@@ -800,8 +988,6 @@ export function CharacterWizard({
                     {consistencyScore}%
                   </span>
                 </div>
-
-                {/* Progress bar */}
                 <div className="mb-4 h-2 overflow-hidden rounded-full bg-muted">
                   <div
                     className={`h-full rounded-full transition-all duration-500 ${
@@ -814,23 +1000,15 @@ export function CharacterWizard({
                     style={{ width: `${consistencyScore}%` }}
                   />
                 </div>
-
-                {/* Warnings for missing fields */}
                 <div className="space-y-1.5">
                   {consistencyItems.map((item) =>
                     item.filled ? (
-                      <div
-                        key={item.field}
-                        className="flex items-center gap-2 text-xs text-green-400"
-                      >
+                      <div key={item.field} className="flex items-center gap-2 text-xs text-green-400">
                         <Check className="h-3 w-3 flex-shrink-0" />
                         <span>{item.field}</span>
                       </div>
                     ) : (
-                      <div
-                        key={item.field}
-                        className="flex items-start gap-2 text-xs text-yellow-500"
-                      >
+                      <div key={item.field} className="flex items-start gap-2 text-xs text-yellow-500">
                         <AlertTriangle className="mt-0.5 h-3 w-3 flex-shrink-0" />
                         <span>{item.warning}</span>
                       </div>
@@ -864,32 +1042,42 @@ export function CharacterWizard({
           )}
         </Button>
 
-        {step < 3 ? (
-          <Button
-            onClick={() => setStep(step + 1)}
-            disabled={!canAdvance}
-          >
-            Next
-            <ChevronRight className="ml-1 h-4 w-4" />
-          </Button>
-        ) : (
-          <Button
-            onClick={handleSubmit}
-            disabled={submitting || visualDescription.length < 20}
-          >
-            {submitting ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Creating...
-              </>
-            ) : (
-              <>
-                <Check className="mr-1 h-4 w-4" />
-                Create Character
-              </>
-            )}
-          </Button>
-        )}
+        <div className="flex items-center gap-2">
+          {/* Skip to preview when on Step 1 with a ref image */}
+          {step === 1 && hasRefImage && canAdvance && (
+            <Button
+              variant="outline"
+              onClick={() => setStep(3)}
+            >
+              Skip to Preview
+              <ChevronRight className="ml-1 h-4 w-4" />
+            </Button>
+          )}
+
+          {step < 3 ? (
+            <Button onClick={() => setStep(step + 1)} disabled={!canAdvance}>
+              {step === 1 && hasRefImage ? "Details" : "Next"}
+              <ChevronRight className="ml-1 h-4 w-4" />
+            </Button>
+          ) : (
+            <Button
+              onClick={handleSubmit}
+              disabled={submitting || (!hasRefImage && visualDescription.length < 20) || (hasRefImage && visualDescription.length < 1)}
+            >
+              {submitting ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {isEditing ? "Saving..." : "Creating..."}
+                </>
+              ) : (
+                <>
+                  <Check className="mr-1 h-4 w-4" />
+                  {isEditing ? "Save Changes" : "Create Character"}
+                </>
+              )}
+            </Button>
+          )}
+        </div>
       </div>
     </div>
   );
