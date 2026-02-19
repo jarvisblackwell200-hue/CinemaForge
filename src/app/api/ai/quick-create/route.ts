@@ -5,8 +5,9 @@ import { db } from "@/lib/db";
 import { ensureUser } from "@/lib/auth";
 import { getGenrePreset } from "@/lib/constants/genre-presets";
 import { planShotsFromScript } from "@/lib/ai/shot-planner";
-import { parseDirectorResponse, estimateCredits } from "@/lib/ai/director";
+import { parseDirectorResponse, estimateCredits, DIRECTOR_CORE_RULES } from "@/lib/ai/director";
 import { resolveCelebrityImages } from "@/lib/celebrity";
+import { generateCharacterRefImage } from "@/lib/kling/character-ref";
 import type { StyleBible } from "@/types/movie";
 
 const QuickCreateSchema = z.object({
@@ -16,20 +17,27 @@ const QuickCreateSchema = z.object({
 
 const QUICK_CREATE_SYSTEM = `You are CinemaForge's AI Director. Given a movie concept, produce ONLY a JSON response (no conversational text). Your output must be a valid JSON object wrapped in \`\`\`json code fences.
 
-RULES:
+${DIRECTOR_CORE_RULES}
+
+ADDITIONAL QUICK-CREATE RULES:
 - Generate a creative, specific title (never generic)
 - Break the story into 2-5 scenes depending on target duration
-- Each scene has 1-4 beats with emotional tones
-- Suggest 1-3 characters with detailed visual descriptions suitable for AI video generation
-- Visual descriptions must be specific: age, build, hair, clothing, distinguishing features
-- Pick the best genre from: noir, scifi, horror, commercial, documentary, custom
-- Keep scenes focused and visual — describe what the CAMERA sees
 - For ~60s target: 3-4 scenes, 8-12 total beats
 - For ~30s target: 2-3 scenes, 4-6 total beats
 - For ~120s+: 4-5 scenes, 15-25 total beats
-- Vary your creative choices — never produce the same structure twice
+- Pick the best genre from: noir, scifi, horror, commercial, documentary, custom
+- Keep scenes focused and visual — describe what the CAMERA sees
+- Vary your creative choices for SCENE STRUCTURE and cinematography — but keep character visual descriptions IDENTICAL if they appear across scenes
 - Be bold and cinematic in your descriptions
 - If the character is or is based on a real celebrity, set "celebrityRef" to their full real name (e.g. "Keanu Reeves"). Keep the celebrity name in "suggestedVisualDescription" too for text-to-video fallback. Set to null for fictional characters.
+
+CRITICAL FOR VIDEO QUALITY (from official Kling 3.0 prompt guidance):
+- Every beat MUST use temporal action timeline: "First [A], then [B], finally [C]." This is the #1 technique for Kling 3.0. NEVER write static snapshots like "Marcus holds an envelope."
+- GOOD: "First, Marcus picks up the envelope and examines the seal. Then, he tears it open and pulls out the photograph. Finally, his expression shifts from curiosity to shock."
+- ALWAYS name characters by their full name in every beat. Never use pronouns — the video generator needs explicit names for character element binding.
+- Scene locations must include sensory/atmospheric detail that grounds the model in spatial context: weather, textures, light sources, reflections. "Steam-filled industrial kitchen with harsh fluorescent lighting reflecting off stainless steel surfaces" not just "Kitchen."
+- Include PHYSICS descriptions for motion — how objects and bodies move through space. "Papers scatter from the desk, the chair scrapes back" not just "he stands up."
+- Match complexity to duration: simple scenes need fewer actions (5-6s), complex action needs more micro-actions (8-10s). Each beat should contain enough visual content to fill its shot duration.
 
 JSON Schema:
 {
@@ -44,7 +52,7 @@ JSON Schema:
       "timeOfDay": "morning|afternoon|evening|night",
       "beats": [
         {
-          "description": "Vivid description of what happens — what the camera sees",
+          "description": "Action unfolding over time: beginning, middle, end. Name all characters explicitly. Describe 2-3 micro-actions the camera will capture.",
           "emotionalTone": "tense|melancholic|hopeful|exciting|mysterious|dramatic|peaceful|fearful|angry|sad|romantic|suspenseful|triumphant|chaotic|reflective|ominous",
           "dialogue": [
             { "character": "Name", "line": "What they say", "emotion": "calm|angry|scared|hopeful|etc" }
@@ -155,7 +163,7 @@ export async function POST(req: Request) {
         title,
         synopsis: analysis.synopsis,
         genre: analysis.genre,
-        targetDuration: analysis.suggestedDuration ?? targetDuration,
+        targetDuration,
         status: "STORYBOARDING",
         styleBible: JSON.parse(JSON.stringify(styleBible)),
         script: JSON.parse(JSON.stringify({ scenes: analysis.scenes })),
@@ -215,18 +223,42 @@ export async function POST(req: Request) {
       await Promise.all(characterUpdates);
     }
 
-    // Build character list with referenceImages for the shot planner
-    const charactersWithRefs = characterRecords.map((c) => {
-      const celeb = celebrityRefs.get(c.name);
-      const refImages = celeb && celebrityImages.has(celeb) ? [celebrityImages.get(celeb)!] : [];
-      return {
-        id: c.id,
-        name: c.name,
-        role: c.role,
-        visualDescription: c.visualDescription,
-        referenceImages: refImages,
-      };
+    // Step 4c: Generate AI reference images for fictional characters (no celebrity ref)
+    const fictionalChars = characterRecords.filter((c) => !celebrityRefs.has(c.name));
+    if (fictionalChars.length > 0) {
+      const refResults = await Promise.allSettled(
+        fictionalChars.map(async (char) => {
+          const refUrl = await generateCharacterRefImage(char.visualDescription);
+          if (refUrl) {
+            await db.character.update({
+              where: { id: char.id },
+              data: { referenceImages: [refUrl] },
+            });
+          }
+          return { charId: char.id, refUrl };
+        }),
+      );
+      for (const outcome of refResults) {
+        if (outcome.status === "rejected") {
+          console.warn("[quick-create] Character ref generation failed:", outcome.reason);
+        }
+      }
+    }
+
+    // Re-fetch character reference images after resolution
+    const updatedChars = await db.character.findMany({
+      where: { movieId: movie.id },
+      select: { id: true, name: true, role: true, visualDescription: true, referenceImages: true },
     });
+
+    // Build character list with referenceImages for the shot planner
+    const charactersWithRefs = updatedChars.map((c) => ({
+      id: c.id,
+      name: c.name,
+      role: c.role,
+      visualDescription: c.visualDescription,
+      referenceImages: c.referenceImages,
+    }));
 
     // Step 5: Plan shots using the deterministic planner
     const plannedShots = planShotsFromScript(
@@ -234,6 +266,7 @@ export async function POST(req: Request) {
       charactersWithRefs,
       styleBible,
       genrePreset,
+      targetDuration,
     );
 
     // Step 6: Bulk-create Shot records
@@ -276,6 +309,8 @@ export async function POST(req: Request) {
           shotCount: shotRecords.length,
           characterCount: characterRecords.length,
           estimatedCredits: creditEstimate.withAssembly,
+          suggestedDuration: analysis.suggestedDuration,
+          targetDuration,
         },
       },
       { status: 201 }

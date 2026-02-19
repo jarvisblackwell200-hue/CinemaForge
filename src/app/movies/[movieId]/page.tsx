@@ -14,6 +14,7 @@ import {
   Coins,
   FileText,
   ChevronRight,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -80,6 +81,8 @@ export default function MovieConceptPage() {
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [chatLoaded, setChatLoaded] = useState(false);
+  const [movieTargetDuration, setMovieTargetDuration] = useState<number | null>(null);
+  const [durationMismatchDismissed, setDurationMismatchDismissed] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -95,6 +98,11 @@ export default function MovieConceptPage() {
         // Restore chat messages if they exist
         if (data.conceptChat && Array.isArray(data.conceptChat) && data.conceptChat.length > 0) {
           setMessages([WELCOME_MESSAGE, ...(data.conceptChat as Message[])]);
+        }
+
+        // Store target duration for mismatch detection
+        if (typeof data.targetDuration === "number") {
+          setMovieTargetDuration(data.targetDuration);
         }
 
         // If the movie already has a script saved, mark all as accepted
@@ -459,6 +467,54 @@ export default function MovieConceptPage() {
                       setAccepted((prev) => ({ ...prev, style: true }))
                     }
                   />
+
+                  {/* Duration mismatch banner */}
+                  {msg.analysis &&
+                    movieTargetDuration &&
+                    msg.analysis.suggestedDuration &&
+                    !durationMismatchDismissed &&
+                    Math.abs(msg.analysis.suggestedDuration - movieTargetDuration) >
+                      movieTargetDuration * 0.3 && (
+                      <Card className="border-amber-500/30 bg-amber-500/5 p-4">
+                        <div className="flex items-start gap-3">
+                          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+                          <div className="flex-1">
+                            <p className="text-sm text-amber-200">
+                              Your story naturally fits ~{msg.analysis.suggestedDuration}s,
+                              but your target is {movieTargetDuration}s.
+                            </p>
+                            <div className="mt-2 flex gap-2">
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={async () => {
+                                  await fetch(`/api/movies/${params.movieId}`, {
+                                    method: "PATCH",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({
+                                      targetDuration: msg.analysis!.suggestedDuration,
+                                    }),
+                                  });
+                                  setMovieTargetDuration(msg.analysis!.suggestedDuration);
+                                  setDurationMismatchDismissed(true);
+                                }}
+                              >
+                                Update target to {msg.analysis.suggestedDuration}s
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="h-7 text-xs"
+                                onClick={() => setDurationMismatchDismissed(true)}
+                              >
+                                Keep {movieTargetDuration}s
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      </Card>
+                    )}
 
                   {/* Accept all + proceed */}
                   {allAccepted && (

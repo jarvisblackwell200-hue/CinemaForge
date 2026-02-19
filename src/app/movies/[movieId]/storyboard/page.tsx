@@ -15,6 +15,7 @@ import {
   Camera,
   Trash2,
   Pencil,
+  RotateCcw,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -24,6 +25,14 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import { ShotCard } from "@/components/movie/ShotCard";
 import { CameraMovementBrowser } from "@/components/movie/CameraMovementBrowser";
 import { PromptPreview } from "@/components/movie/PromptPreview";
@@ -116,6 +125,7 @@ interface MovieData {
   id: string;
   title: string;
   genre: string | null;
+  targetDuration: number | null;
   script: Script | null;
   styleBible: StyleBible | null;
   status: string;
@@ -159,8 +169,21 @@ export default function StoryboardPage() {
     new Set()
   );
   const [generatingAllSketches, setGeneratingAllSketches] = useState(false);
+  const [regenConfirmOpen, setRegenConfirmOpen] = useState(false);
+  const [scaleToFitOpen, setScaleToFitOpen] = useState(false);
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const genAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(true);
+
+  // Clean up on unmount: abort any in-progress generation
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      genAbortRef.current?.abort();
+    };
+  }, []);
 
   // ─── Fetch data ────────────────────────────────────────────
 
@@ -202,6 +225,10 @@ export default function StoryboardPage() {
     if (!movie?.script?.scenes || generating) return;
     setGenerating(true);
 
+    // Create an abort controller for this generation run
+    const abortController = new AbortController();
+    genAbortRef.current = abortController;
+
     const totalBeats = movie.script.scenes.reduce(
       (sum, s) => sum + s.beats.length,
       0
@@ -220,6 +247,9 @@ export default function StoryboardPage() {
       ) {
         const scene = movie.script.scenes[sceneIndex];
         for (const beat of scene.beats) {
+          // Bail if aborted (user navigated away or cancelled)
+          if (abortController.signal.aborted) return;
+
           beatIndex++;
           setGenProgress({
             current: beatIndex,
@@ -251,6 +281,7 @@ export default function StoryboardPage() {
                     ? generatedShots[generatedShots.length - 1].shotType
                     : undefined,
               }),
+              signal: abortController.signal,
             });
 
             if (res.ok) {
@@ -259,7 +290,9 @@ export default function StoryboardPage() {
                 suggestion = data.data[0];
               }
             }
-          } catch {
+          } catch (err) {
+            // If aborted, exit cleanly
+            if (err instanceof DOMException && err.name === "AbortError") return;
             // Fall through to defaults if AI suggestion fails
           }
 
@@ -289,6 +322,9 @@ export default function StoryboardPage() {
         }
       }
 
+      // Bail if aborted before saving
+      if (abortController.signal.aborted) return;
+
       // Saving phase
       setGenProgress((p) => ({ ...p, phase: "saving", beatDescription: "" }));
 
@@ -300,25 +336,97 @@ export default function StoryboardPage() {
           movieId: params.movieId,
           shots: generatedShots,
         }),
+        signal: abortController.signal,
       });
 
       const data = await res.json();
       if (res.ok && data.success) {
-        setShots(data.data);
+        if (mountedRef.current) setShots(data.data);
       } else {
         console.error("Bulk save failed:", data);
       }
 
-      setGenProgress((p) => ({ ...p, phase: "done" }));
+      if (mountedRef.current) {
+        setGenProgress((p) => ({ ...p, phase: "done" }));
+      }
       // Brief delay to show "done" state before clearing
       await new Promise((r) => setTimeout(r, 800));
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
       console.error("Failed to generate shots:", error);
     } finally {
-      setGenerating(false);
-      setGenProgress({ current: 0, total: 0, sceneName: "", beatDescription: "", phase: "" });
+      if (genAbortRef.current === abortController) {
+        genAbortRef.current = null;
+      }
+      if (mountedRef.current) {
+        setGenerating(false);
+        setGenProgress({ current: 0, total: 0, sceneName: "", beatDescription: "", phase: "" });
+      }
     }
   }
+
+  // ─── Regenerate storyboard ─────────────────────────────────
+
+  async function regenerateStoryboard() {
+    setRegenConfirmOpen(false);
+
+    // Abort any in-progress generation first
+    genAbortRef.current?.abort();
+
+    // Delete all draft shots (generated shots are protected)
+    try {
+      await fetch(`/api/shots?movieId=${params.movieId}`, {
+        method: "DELETE",
+      });
+    } catch (error) {
+      console.error("Failed to delete existing shots:", error);
+    }
+
+    setShots([]);
+    // Re-run the generation
+    await generateShotsFromScript();
+  }
+
+  async function scaleToFitTarget() {
+    if (!movie?.targetDuration || shots.length === 0) return;
+    setScaleToFitOpen(false);
+
+    const rawTotal = shots.reduce((s, sh) => s + sh.durationSeconds, 0);
+    if (rawTotal === 0) return;
+
+    const scale = movie.targetDuration / rawTotal;
+    const updated = shots.map((shot) => {
+      const maxDur = shot.cameraMovement?.includes("orbit") ? 12 : 10;
+      const newDuration = Math.max(3, Math.min(maxDur, Math.round(shot.durationSeconds * scale)));
+      return { ...shot, durationSeconds: newDuration };
+    });
+
+    setShots(updated);
+
+    // Persist all duration changes
+    setSaving(true);
+    try {
+      await Promise.all(
+        updated.map((shot) =>
+          shot.id
+            ? fetch(`/api/shots/${shot.id}`, {
+                method: "PATCH",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ durationSeconds: shot.durationSeconds }),
+              })
+            : Promise.resolve()
+        )
+      );
+    } catch (error) {
+      console.error("Failed to save scaled durations:", error);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const hasGeneratedShots = shots.some(
+    (s) => s.status === "COMPLETE" || s.status === "GENERATING"
+  );
 
   // ─── Shot CRUD ─────────────────────────────────────────────
 
@@ -707,11 +815,68 @@ export default function StoryboardPage() {
               </TooltipContent>
             </Tooltip>
 
-            {/* Duration */}
-            <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <Clock className="h-3.5 w-3.5" />
-              {totalDuration}s total
-            </div>
+            {/* Duration budget bar */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  className="flex items-center gap-1.5 rounded-lg border border-border/50 bg-background px-3 py-1.5"
+                  onClick={() => movie?.targetDuration && setScaleToFitOpen(true)}
+                >
+                  <Clock className="h-3.5 w-3.5 text-muted-foreground" />
+                  {movie?.targetDuration ? (
+                    <>
+                      <div className="h-1.5 w-16 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className={`h-full rounded-full transition-all ${
+                            totalDuration <= (movie.targetDuration ?? Infinity)
+                              ? "bg-green-500"
+                              : totalDuration <= (movie.targetDuration ?? Infinity) * 1.2
+                                ? "bg-amber-500"
+                                : "bg-red-500"
+                          }`}
+                          style={{
+                            width: `${Math.min(100, (totalDuration / (movie.targetDuration ?? totalDuration)) * 100)}%`,
+                          }}
+                        />
+                      </div>
+                      <span className="text-xs font-medium">
+                        {totalDuration}s / {movie.targetDuration}s
+                      </span>
+                    </>
+                  ) : (
+                    <span className="text-xs text-muted-foreground">{totalDuration}s total</span>
+                  )}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent className="text-xs">
+                {movie?.targetDuration
+                  ? totalDuration <= movie.targetDuration
+                    ? `${movie.targetDuration - totalDuration}s under target`
+                    : `${totalDuration - movie.targetDuration}s over target — click to scale to fit`
+                  : "No target duration set"}
+              </TooltipContent>
+            </Tooltip>
+
+            {shots.length > 0 && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setRegenConfirmOpen(true)}
+                    disabled={generating}
+                  >
+                    <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                    Regenerate
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="text-xs">
+                  {hasGeneratedShots
+                    ? "Only draft shots will be replaced — generated shots are kept"
+                    : "Delete all shots and re-plan from script"}
+                </TooltipContent>
+              </Tooltip>
+            )}
 
             {shots.length > 0 && (
               <Button
@@ -991,6 +1156,55 @@ export default function StoryboardPage() {
           </div>
         </div>
       )}
+
+      {/* Regenerate confirmation dialog */}
+      <Dialog open={regenConfirmOpen} onOpenChange={setRegenConfirmOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <RotateCcw className="h-5 w-5 text-primary" />
+              Regenerate Storyboard
+            </DialogTitle>
+            <DialogDescription>
+              {hasGeneratedShots
+                ? `This will delete ${shots.filter((s) => s.status === "DRAFT").length} draft shot(s) and re-plan them from your script. ${shots.filter((s) => s.status !== "DRAFT").length} generated shot(s) will be kept.`
+                : `This will delete all ${shots.length} shot(s) and re-plan them from your script using AI suggestions.`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRegenConfirmOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={regenerateStoryboard}>
+              <RotateCcw className="mr-1.5 h-4 w-4" />
+              Regenerate
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Scale to fit dialog */}
+      <Dialog open={scaleToFitOpen} onOpenChange={setScaleToFitOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Clock className="h-5 w-5 text-primary" />
+              Scale to Target Duration
+            </DialogTitle>
+            <DialogDescription>
+              Your storyboard is {totalDuration}s but your target is{" "}
+              {movie?.targetDuration}s. Adjust all shot durations proportionally
+              to fit?
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setScaleToFitOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={scaleToFitTarget}>Scale to fit</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Camera Movement Browser */}
       <CameraMovementBrowser

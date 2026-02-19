@@ -9,6 +9,13 @@ import { Separator } from "@/components/ui/separator";
 import { Header } from "@/components/layout/Header";
 import { QuickCreateDialog } from "@/components/movie/QuickCreateDialog";
 
+const DURATION_OPTIONS = [
+  { value: 30, label: "30s" },
+  { value: 60, label: "60s" },
+  { value: 120, label: "2min" },
+  { value: 180, label: "3min" },
+] as const;
+
 const GENRE_OPTIONS = [
   { id: "noir", label: "Film Noir", gradient: "from-slate-800 to-teal-900" },
   { id: "scifi", label: "Sci-Fi", gradient: "from-blue-900 to-indigo-900" },
@@ -30,6 +37,7 @@ export default function NewMoviePage() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [genre, setGenre] = useState<string | null>(null);
+  const [duration, setDuration] = useState(60);
   const [isCreating, setIsCreating] = useState(false);
   const [quickCreateOpen, setQuickCreateOpen] = useState(false);
 
@@ -44,6 +52,7 @@ export default function NewMoviePage() {
         body: JSON.stringify({
           title: title.trim(),
           genre: genre === "custom" ? null : genre,
+          targetDuration: duration,
         }),
       });
 
@@ -117,6 +126,30 @@ export default function NewMoviePage() {
                       className={`h-8 w-full rounded bg-gradient-to-br ${g.gradient}`}
                     />
                     {g.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-medium">
+                Target Length
+              </label>
+              <p className="mb-3 text-xs text-muted-foreground">
+                How long should your film be?
+              </p>
+              <div className="flex gap-2">
+                {DURATION_OPTIONS.map((opt) => (
+                  <button
+                    key={opt.value}
+                    onClick={() => setDuration(opt.value)}
+                    className={`flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-all ${
+                      duration === opt.value
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border hover:border-primary/30"
+                    }`}
+                  >
+                    {opt.label}
                   </button>
                 ))}
               </div>
