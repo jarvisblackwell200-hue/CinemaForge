@@ -33,6 +33,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
+import { EmptyState } from "@/components/ui/empty-state";
 import { ShotCard } from "@/components/movie/ShotCard";
 import { CameraMovementBrowser } from "@/components/movie/CameraMovementBrowser";
 import { PromptPreview } from "@/components/movie/PromptPreview";
@@ -169,12 +170,15 @@ export default function StoryboardPage() {
     new Set()
   );
   const [generatingAllSketches, setGeneratingAllSketches] = useState(false);
+  const [sketchError, setSketchError] = useState<string | null>(null);
   const [regenConfirmOpen, setRegenConfirmOpen] = useState(false);
   const [scaleToFitOpen, setScaleToFitOpen] = useState(false);
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const genAbortRef = useRef<AbortController | null>(null);
   const mountedRef = useRef(true);
+  const shotsRef = useRef(shots);
+  shotsRef.current = shots;
 
   // Clean up on unmount: abort any in-progress generation
   useEffect(() => {
@@ -373,9 +377,9 @@ export default function StoryboardPage() {
     // Abort any in-progress generation first
     genAbortRef.current?.abort();
 
-    // Delete all draft shots (generated shots are protected)
+    // Delete ALL shots (force=true) so old sketches don't persist
     try {
-      await fetch(`/api/shots?movieId=${params.movieId}`, {
+      await fetch(`/api/shots?movieId=${params.movieId}&force=true`, {
         method: "DELETE",
       });
     } catch (error) {
@@ -434,7 +438,8 @@ export default function StoryboardPage() {
     (shotIndex: number, updates: Partial<ShotData>) => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = setTimeout(async () => {
-        const shot = shots[shotIndex];
+        // Read from ref to avoid stale closure over shots array
+        const shot = shotsRef.current[shotIndex];
         if (!shot?.id) return;
         setSaving(true);
         try {
@@ -450,7 +455,7 @@ export default function StoryboardPage() {
         }
       }, 1000);
     },
-    [shots]
+    []
   );
 
   function updateShot(index: number, updates: Partial<ShotData>) {
@@ -657,30 +662,34 @@ export default function StoryboardPage() {
         }),
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        if (data.success && data.data?.imageUrl) {
-          const imageUrl = data.data.imageUrl;
+      const data = await res.json();
+      if (res.ok && data.success && data.data?.imageUrl) {
+        const imageUrl = data.data.imageUrl;
+        setSketchError(null);
 
-          // Update local state
-          setShots((prev) =>
-            prev.map((s, i) =>
-              i === index ? { ...s, storyboardImageUrl: imageUrl } : s
-            )
-          );
+        // Update local state
+        setShots((prev) =>
+          prev.map((s, i) =>
+            i === index ? { ...s, storyboardImageUrl: imageUrl } : s
+          )
+        );
 
-          // Persist to DB
-          if (shot.id) {
-            await fetch(`/api/shots/${shot.id}`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ storyboardImageUrl: imageUrl }),
-            });
-          }
+        // Persist to DB
+        if (shot.id) {
+          await fetch(`/api/shots/${shot.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ storyboardImageUrl: imageUrl }),
+          });
         }
+      } else {
+        const errorMsg = data.error ?? `Sketch generation failed (${res.status})`;
+        console.error("Sketch generation failed:", errorMsg);
+        setSketchError(errorMsg);
       }
     } catch (error) {
       console.error("Failed to generate sketch:", error);
+      setSketchError(error instanceof Error ? error.message : "Sketch generation failed");
     } finally {
       setSketchGenerating((prev) => {
         const next = new Set(prev);
@@ -728,22 +737,19 @@ export default function StoryboardPage() {
 
   if (!movie?.script?.scenes) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-          <LayoutGrid className="h-7 w-7 text-primary" />
-        </div>
-        <h2 className="text-xl font-semibold">No Script Yet</h2>
-        <p className="max-w-md text-sm text-muted-foreground">
-          Complete the Concept and Script phases first, then come back to plan
-          your shots.
-        </p>
-        <Button
-          variant="secondary"
-          onClick={() => router.push(`/movies/${params.movieId}`)}
-        >
-          Go to Concept
-        </Button>
-      </div>
+      <EmptyState
+        icon={<LayoutGrid className="h-7 w-7 text-primary" />}
+        title="No Script Yet"
+        description="Complete the Concept and Script phases first, then come back to plan your shots."
+        action={
+          <Button
+            variant="secondary"
+            onClick={() => router.push(`/movies/${params.movieId}`)}
+          >
+            Go to Concept
+          </Button>
+        }
+      />
     );
   }
 
@@ -871,9 +877,7 @@ export default function StoryboardPage() {
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent className="text-xs">
-                  {hasGeneratedShots
-                    ? "Only draft shots will be replaced — generated shots are kept"
-                    : "Delete all shots and re-plan from script"}
+                  Delete all shots and re-plan from script
                 </TooltipContent>
               </Tooltip>
             )}
@@ -913,22 +917,18 @@ export default function StoryboardPage() {
 
       {/* Empty state: generate from script */}
       {shots.length === 0 && !generating && (
-        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
-          <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-            <Sparkles className="h-7 w-7 text-primary" />
-          </div>
-          <h2 className="text-xl font-semibold">Generate Shot Plan</h2>
-          <p className="max-w-md text-sm text-muted-foreground">
-            Your script has {scenes.length} scene
-            {scenes.length !== 1 ? "s" : ""} with{" "}
-            {scenes.reduce((sum, s) => sum + s.beats.length, 0)} beats. The AI
-            Director will suggest camera angles and movements for each beat.
-          </p>
-          <Button onClick={generateShotsFromScript}>
-            <Sparkles className="mr-2 h-4 w-4" />
-            Auto-generate shots from script
-          </Button>
-        </div>
+        <EmptyState
+          icon={<Sparkles className="h-7 w-7 text-primary" />}
+          title="Generate Shot Plan"
+          description={`Your script has ${scenes.length} scene${scenes.length !== 1 ? "s" : ""} with ${scenes.reduce((sum, s) => sum + s.beats.length, 0)} beats. The AI Director will suggest camera angles and movements for each beat.`}
+          className="flex-1"
+          action={
+            <Button onClick={generateShotsFromScript}>
+              <Sparkles className="mr-2 h-4 w-4" />
+              Auto-generate shots from script
+            </Button>
+          }
+        />
       )}
 
       {/* Generation progress overlay */}
@@ -1006,6 +1006,22 @@ export default function StoryboardPage() {
 
             {/* Fun director tips that rotate */}
             <DirectorTips />
+
+            {/* Cancel button */}
+            <div className="flex justify-center">
+              <Button
+                variant="ghost"
+                size="sm"
+                className="text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => {
+                  genAbortRef.current?.abort();
+                  setGenerating(false);
+                  setGenProgress({ current: 0, total: 0, sceneName: "", beatDescription: "", phase: "" });
+                }}
+              >
+                Cancel generation
+              </Button>
+            </div>
           </div>
         </div>
       )}
@@ -1106,6 +1122,20 @@ export default function StoryboardPage() {
               </div>
             ))}
 
+            {/* Sketch error */}
+            {sketchError && (
+              <div className="flex items-center gap-2 rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3">
+                <AlertTriangle className="h-4 w-4 shrink-0 text-red-500" />
+                <span className="text-sm text-red-400">{sketchError}</span>
+                <button
+                  onClick={() => setSketchError(null)}
+                  className="ml-auto text-xs text-red-500/60 hover:text-red-400"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+
             {/* Warnings */}
             {hasEmptyShots && (
               <div className="flex items-center gap-2 rounded-lg border border-yellow-500/20 bg-yellow-500/5 px-4 py-3">
@@ -1166,9 +1196,8 @@ export default function StoryboardPage() {
               Regenerate Storyboard
             </DialogTitle>
             <DialogDescription>
-              {hasGeneratedShots
-                ? `This will delete ${shots.filter((s) => s.status === "DRAFT").length} draft shot(s) and re-plan them from your script. ${shots.filter((s) => s.status !== "DRAFT").length} generated shot(s) will be kept.`
-                : `This will delete all ${shots.length} shot(s) and re-plan them from your script using AI suggestions.`}
+              This will delete all {shots.length} shot(s) including any sketches and re-plan them from your script using AI suggestions.
+              {hasGeneratedShots && " Generated video takes will be lost."}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -15,8 +15,14 @@ import {
   CircleDot,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { CREDIT_COSTS } from "@/lib/constants/pricing";
 
 // ─── Types ──────────────────────────────────────────────────────
@@ -184,22 +190,19 @@ export default function TimelinePage() {
 
   if (shots.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-          <Layers className="h-7 w-7 text-primary" />
-        </div>
-        <h2 className="text-xl font-semibold">No Completed Shots</h2>
-        <p className="max-w-md text-sm text-muted-foreground">
-          Generate your shots first, then come back here to arrange them on the
-          timeline and assemble your movie.
-        </p>
-        <Button
-          variant="secondary"
-          onClick={() => router.push(`/movies/${params.movieId}/generate`)}
-        >
-          Go to Generate
-        </Button>
-      </div>
+      <EmptyState
+        icon={<Layers className="h-7 w-7 text-primary" />}
+        title="No Completed Shots"
+        description="Generate your shots first, then come back here to arrange them on the timeline and assemble your movie."
+        action={
+          <Button
+            variant="secondary"
+            onClick={() => router.push(`/movies/${params.movieId}/generate`)}
+          >
+            Go to Generate
+          </Button>
+        }
+      />
     );
   }
 
@@ -341,24 +344,32 @@ export default function TimelinePage() {
 
               {/* Transition picker between shots */}
               {index < shots.length - 1 && (
-                <div className="flex w-20 shrink-0 flex-col items-center gap-1 px-2">
+                <div className="flex w-24 shrink-0 flex-col items-center gap-1 px-2">
+                  <span className="mb-0.5 text-[9px] font-medium uppercase tracking-wider text-muted-foreground/50">
+                    Transition
+                  </span>
                   {TRANSITION_OPTIONS.map((opt) => {
                     const Icon = opt.icon;
                     const isActive = transitions[index]?.type === opt.type;
                     return (
-                      <button
-                        key={opt.type}
-                        onClick={() => setTransition(index, opt.type)}
-                        className={`flex w-full items-center gap-1 rounded px-2 py-1 text-[10px] transition-colors ${
-                          isActive
-                            ? "bg-primary/10 text-primary"
-                            : "text-muted-foreground hover:bg-muted"
-                        }`}
-                        title={opt.desc}
-                      >
-                        <Icon className="h-3 w-3" />
-                        {opt.label}
-                      </button>
+                      <Tooltip key={opt.type}>
+                        <TooltipTrigger asChild>
+                          <button
+                            onClick={() => setTransition(index, opt.type)}
+                            className={`flex w-full items-center gap-1.5 rounded px-2 py-1 text-[10px] transition-colors ${
+                              isActive
+                                ? "bg-primary/10 text-primary"
+                                : "text-muted-foreground hover:bg-muted"
+                            }`}
+                          >
+                            <Icon className="h-3 w-3 shrink-0" />
+                            {opt.label}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" className="text-xs">
+                          {opt.desc}
+                        </TooltipContent>
+                      </Tooltip>
                     );
                   })}
                 </div>

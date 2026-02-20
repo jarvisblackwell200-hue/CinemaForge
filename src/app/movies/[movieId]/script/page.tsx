@@ -6,7 +6,6 @@ import {
   FileText,
   Plus,
   Trash2,
-  GripVertical,
   ChevronRight,
   ChevronDown,
   MapPin,
@@ -24,6 +23,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty-state";
 import {
   Tooltip,
   TooltipContent,
@@ -317,23 +317,20 @@ export default function ScriptPage() {
 
   if (!movie?.script || scenes.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-          <FileText className="h-7 w-7 text-primary" />
-        </div>
-        <h2 className="text-xl font-semibold">No Script Yet</h2>
-        <p className="max-w-md text-sm text-muted-foreground">
-          Head back to the Concept phase and describe your movie idea to the AI
-          Director. It will generate a structured script for you to edit here.
-        </p>
-        <Button
-          variant="secondary"
-          onClick={() => router.push(`/movies/${params.movieId}`)}
-        >
-          <Sparkles className="mr-2 h-4 w-4" />
-          Go to Concept
-        </Button>
-      </div>
+      <EmptyState
+        icon={<FileText className="h-7 w-7 text-primary" />}
+        title="No Script Yet"
+        description="Head back to the Concept phase and describe your movie idea to the AI Director. It will generate a structured script for you to edit here."
+        action={
+          <Button
+            variant="secondary"
+            onClick={() => router.push(`/movies/${params.movieId}`)}
+          >
+            <Sparkles className="mr-2 h-4 w-4" />
+            Go to Concept
+          </Button>
+        }
+      />
     );
   }
 
@@ -464,7 +461,7 @@ export default function ScriptPage() {
                 onClick={() => toggleScene(sceneIndex)}
                 className="flex w-full items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-secondary/50"
               >
-                <GripVertical className="h-4 w-4 flex-shrink-0 text-muted-foreground/40" />
+                <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center text-xs font-mono text-muted-foreground/60">{sceneIndex + 1}</span>
                 {expandedScenes.has(sceneIndex) ? (
                   <ChevronDown className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
                 ) : (
@@ -567,7 +564,7 @@ export default function ScriptPage() {
                         className="group rounded-lg border border-border/50 bg-background/50 p-3"
                       >
                         <div className="flex items-start gap-2">
-                          <GripVertical className="mt-1 h-4 w-4 flex-shrink-0 text-muted-foreground/30" />
+                          <span className="mt-1 flex h-4 w-4 flex-shrink-0 items-center justify-center text-xs font-mono text-muted-foreground/40">{beatIndex + 1}</span>
                           <div className="flex-1 space-y-2">
                             {/* Beat header */}
                             <div className="flex items-center gap-2">
@@ -592,13 +589,20 @@ export default function ScriptPage() {
                                   placeholder="Tone"
                                 />
                               </div>
-                              <div className="ml-auto flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                              <div className="ml-auto flex items-center gap-1">
                                 <Tooltip>
                                   <TooltipTrigger asChild>
                                     <Button
                                       variant="ghost"
                                       size="icon"
-                                      className="h-6 w-6"
+                                      className={`h-6 w-6 ${
+                                        editingDialogue?.sceneIndex === sceneIndex &&
+                                        editingDialogue?.beatIndex === beatIndex
+                                          ? "text-primary"
+                                          : beat.dialogue?.length
+                                            ? "text-primary/60"
+                                            : "text-muted-foreground/40 hover:text-muted-foreground"
+                                      }`}
                                       onClick={() => {
                                         if (
                                           editingDialogue?.sceneIndex ===
@@ -636,7 +640,7 @@ export default function ScriptPage() {
                                       <Button
                                         variant="ghost"
                                         size="icon"
-                                        className="h-6 w-6 text-destructive/60 hover:text-destructive"
+                                        className="h-6 w-6 text-destructive/60 opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
                                         onClick={() =>
                                           removeBeat(sceneIndex, beatIndex)
                                         }

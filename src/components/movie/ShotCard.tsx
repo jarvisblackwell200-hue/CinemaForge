@@ -4,7 +4,6 @@ import { useState } from "react";
 import {
   Camera,
   Clock,
-  GripVertical,
   ChevronDown,
   ChevronUp,
   Trash2,
@@ -20,6 +19,8 @@ import {
   ImageIcon,
   Loader2,
   RefreshCw,
+  Link2,
+  Unlink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -27,6 +28,11 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import type { ShotDialogue } from "@/types/shot";
 
 const SHOT_TYPES = [
@@ -57,6 +63,7 @@ interface ShotData {
   generatedPrompt?: string | null;
   negativePrompt?: string | null;
   storyboardImageUrl?: string | null;
+  startFrameUrl?: string | null;
   status?: string;
   takes?: {
     id: string;
@@ -98,7 +105,7 @@ function getShotTypeColor(shotType: string): string {
     case "dutch-angle":
       return "bg-orange-600/20 text-orange-400 border-orange-500/30";
     default:
-      return "bg-neutral-600/20 text-neutral-400 border-neutral-500/30";
+      return "bg-muted text-muted-foreground border-border";
   }
 }
 
@@ -113,7 +120,7 @@ function getStatusIndicator(status?: string) {
     case "FAILED":
       return <span className="h-2 w-2 rounded-full bg-red-500" />;
     default:
-      return <span className="h-2 w-2 rounded-full bg-neutral-600" />;
+      return <span className="h-2 w-2 rounded-full bg-muted-foreground/30" />;
   }
 }
 
@@ -149,13 +156,12 @@ export function ShotCard({
 
   if (!isExpanded) {
     return (
-      <Card className="border-neutral-800 bg-[#1a1a1a] hover:bg-[#222] transition-colors">
+      <Card className="border-border bg-card hover:bg-accent/10 transition-colors">
         <CardContent className="flex items-center gap-3 p-3">
-          <GripVertical className="h-4 w-4 shrink-0 cursor-grab text-neutral-600" />
           {/* Sketch thumbnail */}
-          <div className="shrink-0 h-[34px] w-[60px] rounded border border-neutral-700/50 bg-[#0f0f0f] overflow-hidden flex items-center justify-center">
+          <div className="shrink-0 h-9 w-16 rounded border border-border bg-background overflow-hidden flex items-center justify-center">
             {isGeneratingSketch ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin text-neutral-500" />
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
             ) : shot.storyboardImageUrl ? (
               <img
                 src={shot.storyboardImageUrl}
@@ -163,34 +169,47 @@ export function ShotCard({
                 className="h-full w-full object-cover"
               />
             ) : (
-              <Pencil className="h-3 w-3 text-neutral-600" />
+              <Pencil className="h-3 w-3 text-muted-foreground/40" />
             )}
           </div>
           <div
             className="flex flex-1 items-center gap-3 cursor-pointer min-w-0"
             onClick={onToggleExpand}
           >
-            <Badge variant="outline" className="shrink-0 border-neutral-700 text-neutral-300 font-mono text-xs">
+            <Badge variant="outline" className="shrink-0 border-border text-foreground font-mono text-xs">
               {index + 1}
             </Badge>
             <Badge variant="outline" className={`shrink-0 text-xs ${getShotTypeColor(shot.shotType)}`}>
               {shot.shotType}
             </Badge>
-            <span className="text-xs text-neutral-500 shrink-0 flex items-center gap-1">
-              <Camera className="h-3 w-3" />
-              {shot.cameraMovement || "No movement"}
-            </span>
-            <span className="text-sm text-neutral-300 truncate min-w-0">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="text-xs text-muted-foreground shrink-0 flex items-center gap-1 max-w-[140px] truncate">
+                  <Camera className="h-3 w-3 shrink-0" />
+                  {shot.cameraMovement || "No movement"}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent className="text-xs max-w-xs">
+                {shot.cameraMovement || "No camera movement set"}
+              </TooltipContent>
+            </Tooltip>
+            <span className="text-sm text-foreground truncate min-w-0">
               {shot.subject || "Untitled shot"}
             </span>
             <div className="ml-auto flex items-center gap-2 shrink-0">
-              {shot.dialogue && <MessageSquare className="h-3 w-3 text-neutral-500" />}
-              <Badge variant="outline" className="border-neutral-700 text-neutral-400 text-xs font-mono">
+              {shot.dialogue && <MessageSquare className="h-3 w-3 text-muted-foreground" />}
+              <Badge variant="outline" className="border-border text-muted-foreground text-xs font-mono">
                 <Clock className="mr-1 h-3 w-3" />
                 {shot.durationSeconds}s
               </Badge>
+              {shot.status === "COMPLETE" && shot.startFrameUrl && (
+                <Link2 className="h-3 w-3 text-green-500" />
+              )}
+              {shot.status === "COMPLETE" && !shot.startFrameUrl && (
+                <Unlink className="h-3 w-3 text-red-400" />
+              )}
               {getStatusIndicator(shot.status)}
-              <ChevronDown className="h-4 w-4 text-neutral-600" />
+              <ChevronDown className="h-4 w-4 text-muted-foreground/40" />
             </div>
           </div>
         </CardContent>
@@ -199,29 +218,28 @@ export function ShotCard({
   }
 
   return (
-    <Card className="border-amber-500/30 bg-[#1a1a1a]">
+    <Card className="border-primary/40 bg-card">
       <CardContent className="p-4 space-y-4">
         {/* Header */}
         <div className="flex items-center gap-3">
-          <GripVertical className="h-4 w-4 shrink-0 cursor-grab text-neutral-600" />
-          <Badge variant="outline" className="border-neutral-700 text-neutral-300 font-mono text-xs">
+          <Badge variant="outline" className="border-border text-foreground font-mono text-xs">
             Shot {index + 1}
           </Badge>
           {getStatusIndicator(shot.status)}
-          <span className="text-xs text-neutral-500 uppercase">{shot.status || "DRAFT"}</span>
+          <span className="text-xs text-muted-foreground uppercase">{shot.status || "DRAFT"}</span>
           <div className="ml-auto">
-            <Button variant="ghost" size="sm" onClick={onToggleExpand} className="text-neutral-400 hover:text-neutral-200">
+            <Button variant="ghost" size="sm" onClick={onToggleExpand} className="text-muted-foreground hover:text-foreground">
               <ChevronUp className="h-4 w-4" />
             </Button>
           </div>
         </div>
 
-        <Separator className="bg-neutral-800" />
+        <Separator />
 
         {/* Storyboard Sketch */}
         <div className="space-y-2">
           {shot.storyboardImageUrl ? (
-            <div className="relative rounded-lg overflow-hidden border border-neutral-800 bg-[#0a0a0a]">
+            <div className="relative rounded-lg overflow-hidden border border-border bg-background">
               <img
                 src={shot.storyboardImageUrl}
                 alt={`Shot ${index + 1} storyboard sketch`}
@@ -229,9 +247,9 @@ export function ShotCard({
               />
             </div>
           ) : (
-            <div className="w-full aspect-video rounded-lg border border-dashed border-neutral-700 bg-[#0a0a0a] flex flex-col items-center justify-center gap-1.5">
-              <ImageIcon className="h-6 w-6 text-neutral-700" />
-              <span className="text-xs text-neutral-600">No storyboard sketch</span>
+            <div className="w-full aspect-video rounded-lg border border-dashed border-border bg-background flex flex-col items-center justify-center gap-1.5">
+              <ImageIcon className="h-6 w-6 text-muted-foreground/30" />
+              <span className="text-xs text-muted-foreground/60">No storyboard sketch</span>
             </div>
           )}
           {onGenerateSketch && (
@@ -240,7 +258,7 @@ export function ShotCard({
               size="sm"
               onClick={onGenerateSketch}
               disabled={isGeneratingSketch || (!shot.subject && !shot.action)}
-              className="w-full border-neutral-700 text-neutral-300 hover:border-amber-500/50 hover:text-amber-400 gap-1.5"
+              className="w-full border-border text-foreground hover:border-primary/50 hover:text-primary gap-1.5"
             >
               {isGeneratingSketch ? (
                 <>
@@ -262,11 +280,11 @@ export function ShotCard({
           )}
         </div>
 
-        <Separator className="bg-neutral-800" />
+        <Separator />
 
         {/* Camera Section */}
         <div className="space-y-3">
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 flex items-center gap-1.5">
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
             <Camera className="h-3.5 w-3.5" /> Camera
           </h4>
           <div className="flex flex-wrap gap-1.5">
@@ -277,7 +295,7 @@ export function ShotCard({
                 className={`px-2.5 py-1 rounded-full text-xs font-medium border transition-colors ${
                   shot.shotType === type
                     ? getShotTypeColor(type) + " ring-1 ring-current"
-                    : "border-neutral-700 text-neutral-500 hover:text-neutral-300 hover:border-neutral-600"
+                    : "border-border text-muted-foreground hover:text-foreground hover:border-muted-foreground"
                 }`}
               >
                 {type}
@@ -289,14 +307,14 @@ export function ShotCard({
               value={shot.cameraMovement}
               readOnly
               placeholder="Select camera movement..."
-              className="flex-1 bg-[#0f0f0f] border-neutral-800 text-neutral-300 text-sm"
+              className="flex-1 bg-background border-border text-foreground text-sm"
             />
-            <Button variant="outline" size="sm" onClick={onOpenCameraBrowser} className="border-neutral-700 text-neutral-300 hover:border-amber-500/50 hover:text-amber-400">
+            <Button variant="outline" size="sm" onClick={onOpenCameraBrowser} className="border-border text-foreground hover:border-primary/50 hover:text-primary">
               <Eye className="mr-1.5 h-3.5 w-3.5" /> Browse
             </Button>
           </div>
           <div className="flex items-center gap-3">
-            <label className="text-xs text-neutral-500 shrink-0">Duration</label>
+            <label className="text-xs text-muted-foreground shrink-0">Duration</label>
             <input
               type="range"
               min={3}
@@ -305,7 +323,7 @@ export function ShotCard({
               onChange={(e) => onChange({ durationSeconds: parseInt(e.target.value, 10) })}
               className="flex-1 accent-amber-500 h-1.5"
             />
-            <Badge variant="outline" className="font-mono text-xs border-neutral-700 text-neutral-300 tabular-nums">
+            <Badge variant="outline" className="font-mono text-xs border-border text-foreground tabular-nums">
               {shot.durationSeconds}s
             </Badge>
             {shot.durationSeconds > 8 && (
@@ -316,24 +334,24 @@ export function ShotCard({
           </div>
         </div>
 
-        <Separator className="bg-neutral-800" />
+        <Separator />
 
         {/* Subject & Action */}
         <div className="space-y-3">
-          <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Subject & Action</h4>
+          <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Subject & Action</h4>
           <Textarea
             value={shot.subject}
             onChange={(e) => onChange({ subject: e.target.value })}
             placeholder="Who or what is on screen..."
             rows={2}
-            className="bg-[#0f0f0f] border-neutral-800 text-neutral-200 text-sm resize-none"
+            className="bg-background border-border text-foreground text-sm resize-none"
           />
           <Textarea
             value={shot.action}
             onChange={(e) => onChange({ action: e.target.value })}
             placeholder="What happens (beginning, middle, end)..."
             rows={2}
-            className="bg-[#0f0f0f] border-neutral-800 text-neutral-200 text-sm resize-none"
+            className="bg-background border-border text-foreground text-sm resize-none"
           />
         </div>
 
@@ -344,21 +362,21 @@ export function ShotCard({
               variant="ghost"
               size="sm"
               onClick={() => setShowEnvLighting(true)}
-              className="text-neutral-500 hover:text-neutral-300 text-xs gap-1.5"
+              className="text-muted-foreground hover:text-foreground text-xs gap-1.5"
             >
               <Plus className="h-3 w-3" /> Environment & Lighting
             </Button>
           ) : (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 flex items-center gap-1.5">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
                   <MapPin className="h-3.5 w-3.5" /> Environment & <Sun className="h-3.5 w-3.5" /> Lighting
                 </h4>
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={() => setShowEnvLighting(false)}
-                  className="text-neutral-600 hover:text-neutral-400 h-6 w-6 p-0"
+                  className="text-muted-foreground/60 hover:text-muted-foreground h-6 w-6 p-0"
                 >
                   <X className="h-3 w-3" />
                 </Button>
@@ -367,13 +385,13 @@ export function ShotCard({
                 value={shot.environment ?? ""}
                 onChange={(e) => onChange({ environment: e.target.value || null })}
                 placeholder="Location, time of day, weather..."
-                className="bg-[#0f0f0f] border-neutral-800 text-neutral-200 text-sm"
+                className="bg-background border-border text-foreground text-sm"
               />
               <Input
                 value={shot.lighting ?? ""}
                 onChange={(e) => onChange({ lighting: e.target.value || null })}
                 placeholder="Light sources, mood, quality..."
-                className="bg-[#0f0f0f] border-neutral-800 text-neutral-200 text-sm"
+                className="bg-background border-border text-foreground text-sm"
               />
             </div>
           )}
@@ -390,14 +408,14 @@ export function ShotCard({
                   dialogue: { characterId: "", characterName: "", line: "", emotion: "neutral" },
                 })
               }
-              className="text-neutral-500 hover:text-neutral-300 text-xs gap-1.5"
+              className="text-muted-foreground hover:text-foreground text-xs gap-1.5"
             >
               <MessageSquare className="h-3 w-3" /> Add Dialogue
             </Button>
           ) : (
             <div className="space-y-3">
               <div className="flex items-center justify-between">
-                <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-500 flex items-center gap-1.5">
+                <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
                   <MessageSquare className="h-3.5 w-3.5" /> Dialogue
                 </h4>
                 <Button
@@ -416,7 +434,7 @@ export function ShotCard({
                     onChange({ dialogue: { ...shot.dialogue!, characterName: e.target.value } })
                   }
                   placeholder="Character name"
-                  className="bg-[#0f0f0f] border-neutral-800 text-neutral-200 text-sm"
+                  className="bg-background border-border text-foreground text-sm"
                 />
                 <Input
                   value={shot.dialogue.emotion}
@@ -424,7 +442,7 @@ export function ShotCard({
                     onChange({ dialogue: { ...shot.dialogue!, emotion: e.target.value } })
                   }
                   placeholder="Emotion (e.g. stern, hopeful)"
-                  className="bg-[#0f0f0f] border-neutral-800 text-neutral-200 text-sm"
+                  className="bg-background border-border text-foreground text-sm"
                 />
               </div>
               <Input
@@ -433,25 +451,25 @@ export function ShotCard({
                   onChange({ dialogue: { ...shot.dialogue!, line: e.target.value } })
                 }
                 placeholder="Dialogue line..."
-                className="bg-[#0f0f0f] border-neutral-800 text-neutral-200 text-sm"
+                className="bg-background border-border text-foreground text-sm"
               />
             </div>
           )}
         </div>
 
-        <Separator className="bg-neutral-800" />
+        <Separator />
 
         {/* Prompt Preview */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <h4 className="text-xs font-semibold uppercase tracking-wider text-neutral-500">Prompt Preview</h4>
-            <span className="text-xs text-neutral-600 tabular-nums">{previewPrompt.length} chars</span>
+            <h4 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Prompt Preview</h4>
+            <span className="text-xs text-muted-foreground/60 tabular-nums">{previewPrompt.length} chars</span>
           </div>
           <textarea
             value={previewPrompt}
             readOnly
             rows={3}
-            className="w-full rounded-md border border-neutral-800 bg-[#0a0a0a] px-3 py-2 font-mono text-xs text-neutral-400 resize-none focus:outline-none"
+            className="w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground resize-none focus:outline-none"
           />
         </div>
 
@@ -461,7 +479,7 @@ export function ShotCard({
             variant="outline"
             size="sm"
             onClick={onRequestSuggestion}
-            className="border-amber-500/30 text-amber-400 hover:bg-amber-500/10 hover:text-amber-300 gap-1.5"
+            className="border-primary/30 text-primary hover:bg-primary/10 hover:text-primary gap-1.5"
           >
             <Sparkles className="h-3.5 w-3.5" /> Suggest
           </Button>
@@ -474,7 +492,7 @@ export function ShotCard({
           >
             <Trash2 className="h-3.5 w-3.5" /> Delete
           </Button>
-          <Button variant="ghost" size="sm" onClick={onToggleExpand} className="text-neutral-400 hover:text-neutral-200">
+          <Button variant="ghost" size="sm" onClick={onToggleExpand} className="text-muted-foreground hover:text-foreground">
             <ChevronUp className="h-4 w-4" />
           </Button>
         </div>

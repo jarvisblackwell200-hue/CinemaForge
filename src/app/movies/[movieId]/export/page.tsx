@@ -13,6 +13,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 
@@ -108,23 +109,20 @@ export default function ExportPage() {
 
   if (!movie?.timeline?.exportedUrl) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-          <Download className="h-7 w-7 text-primary" />
-        </div>
-        <h2 className="text-xl font-semibold">No Export Available</h2>
-        <p className="max-w-md text-sm text-muted-foreground">
-          Assemble your shots on the timeline first, then come back here to
-          download the finished movie.
-        </p>
-        <Button
-          variant="secondary"
-          onClick={() => router.push(`/movies/${params.movieId}/timeline`)}
-        >
-          <ArrowLeft className="mr-2 h-4 w-4" />
-          Go to Timeline
-        </Button>
-      </div>
+      <EmptyState
+        icon={<Download className="h-7 w-7 text-primary" />}
+        title="No Export Available"
+        description="Assemble your shots on the timeline first, then come back here to download the finished movie."
+        action={
+          <Button
+            variant="secondary"
+            onClick={() => router.push(`/movies/${params.movieId}/timeline`)}
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Go to Timeline
+          </Button>
+        }
+      />
     );
   }
 

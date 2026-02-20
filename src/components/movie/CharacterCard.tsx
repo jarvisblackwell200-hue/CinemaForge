@@ -58,7 +58,7 @@ export function CharacterCard({
       <Button
         variant="ghost"
         size="icon-xs"
-        className="absolute right-2 top-2 z-10 opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
+        className="absolute right-2 top-2 z-10 opacity-60 sm:opacity-0 transition-opacity group-hover:opacity-100 text-muted-foreground hover:text-destructive"
         onClick={(e) => {
           e.stopPropagation();
           onDelete();
@@ -133,9 +133,9 @@ export function CharacterCard({
             <span className="text-[10px] text-muted-foreground/60">
               Created {createdDate}
             </span>
-            <span className="flex items-center gap-1 text-[10px] text-muted-foreground/60 opacity-0 transition-opacity group-hover:opacity-100">
+            <span className="flex items-center gap-1 text-[10px] text-primary/40 sm:text-muted-foreground/60 sm:opacity-0 transition-opacity group-hover:opacity-100">
               <Edit className="h-3 w-3" />
-              Edit
+              Tap to edit
             </span>
           </div>
         </CardContent>

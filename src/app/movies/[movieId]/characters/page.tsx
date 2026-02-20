@@ -1,15 +1,17 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import {
   Users,
   Plus,
   Trash2,
   AlertTriangle,
   Loader2,
+  ChevronRight,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/ui/empty-state";
 import {
   Dialog,
   DialogContent,
@@ -41,6 +43,7 @@ interface Character {
 
 export default function CharactersPage() {
   const params = useParams<{ movieId: string }>();
+  const router = useRouter();
   const movieId = params.movieId;
 
   const [characters, setCharacters] = useState<Character[]>([]);
@@ -162,16 +165,17 @@ export default function CharactersPage() {
 
   if (error && characters.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-destructive/10">
-          <AlertTriangle className="h-7 w-7 text-destructive" />
-        </div>
-        <h2 className="text-xl font-semibold">Failed to load characters</h2>
-        <p className="max-w-md text-sm text-muted-foreground">{error}</p>
-        <Button variant="outline" onClick={fetchCharacters}>
-          Retry
-        </Button>
-      </div>
+      <EmptyState
+        icon={<AlertTriangle className="h-7 w-7 text-destructive" />}
+        title="Failed to load characters"
+        description={error}
+        variant="destructive"
+        action={
+          <Button variant="outline" onClick={fetchCharacters}>
+            Retry
+          </Button>
+        }
+      />
     );
   }
 
@@ -201,21 +205,17 @@ export default function CharactersPage() {
       <div className="flex-1 overflow-y-auto p-6">
         {characters.length === 0 ? (
           /* Empty state */
-          <div className="flex h-full flex-col items-center justify-center gap-4 text-center">
-            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-              <Users className="h-7 w-7 text-primary" />
-            </div>
-            <h2 className="text-xl font-semibold">No characters yet</h2>
-            <p className="max-w-md text-sm text-muted-foreground">
-              Define your characters with detailed visual descriptions and
-              reference images. Consistency starts here -- the more detail you
-              provide, the better your characters will look across every shot.
-            </p>
-            <Button onClick={openCreateWizard} className="mt-2">
-              <Plus className="mr-2 h-4 w-4" />
-              Add your first character
-            </Button>
-          </div>
+          <EmptyState
+            icon={<Users className="h-7 w-7 text-primary" />}
+            title="No characters yet"
+            description="Define your characters with detailed visual descriptions and reference images. Consistency starts here -- the more detail you provide, the better your characters will look across every shot."
+            action={
+              <Button onClick={openCreateWizard} className="mt-2">
+                <Plus className="mr-2 h-4 w-4" />
+                Add your first character
+              </Button>
+            }
+          />
         ) : (
           /* Character grid */
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
@@ -240,6 +240,18 @@ export default function CharactersPage() {
           </div>
         )}
       </div>
+
+      {/* Continue button */}
+      {characters.length > 0 && (
+        <div className="border-t border-border px-6 py-3 flex justify-end">
+          <Button
+            onClick={() => router.push(`/movies/${movieId}/storyboard`)}
+          >
+            Continue to Storyboard
+            <ChevronRight className="ml-1 h-4 w-4" />
+          </Button>
+        </div>
+      )}
 
       {/* Character Wizard Dialog */}
       <Dialog open={wizardOpen} onOpenChange={(open) => { if (!open) closeWizard(); }}>

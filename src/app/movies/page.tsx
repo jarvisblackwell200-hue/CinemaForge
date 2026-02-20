@@ -31,13 +31,13 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const STATUS_COLORS: Record<string, string> = {
-  CONCEPT: "bg-muted text-muted-foreground",
-  SCRIPTING: "bg-blue-500/10 text-blue-400",
-  CHARACTERS: "bg-purple-500/10 text-purple-400",
-  STORYBOARDING: "bg-amber-500/10 text-amber-400",
-  GENERATING: "bg-orange-500/10 text-orange-400",
-  ASSEMBLING: "bg-cyan-500/10 text-cyan-400",
-  COMPLETE: "bg-green-500/10 text-green-400",
+  CONCEPT: "bg-muted text-muted-foreground border border-border",
+  SCRIPTING: "bg-blue-500/10 text-blue-400 border border-blue-500/20",
+  CHARACTERS: "bg-purple-500/10 text-purple-400 border border-purple-500/20",
+  STORYBOARDING: "bg-amber-500/10 text-amber-400 border border-amber-500/20",
+  GENERATING: "bg-orange-500/10 text-orange-400 border border-orange-500/20",
+  ASSEMBLING: "bg-cyan-500/10 text-cyan-400 border border-cyan-500/20",
+  COMPLETE: "bg-green-500/10 text-green-400 border border-green-500/20",
 };
 
 const GENRE_GRADIENTS: Record<string, string> = {

@@ -19,6 +19,8 @@ import {
   SkipForward,
   Volume2,
   VolumeX,
+  Link2,
+  Unlink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -36,7 +38,9 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { EmptyState } from "@/components/ui/empty-state";
 import { getCreditCost } from "@/lib/constants/pricing";
+import { TakeComparison } from "@/components/movie/TakeComparison";
 import type { QualityTier } from "@/lib/kling/types";
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -64,6 +68,8 @@ interface ShotData {
   durationSeconds: number;
   generatedPrompt: string | null;
   negativePrompt: string | null;
+  startFrameUrl: string | null;
+  endFrameUrl: string | null;
   status: string;
   takes: TakeData[];
 }
@@ -101,7 +107,11 @@ export default function GeneratePage() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [previewShot, setPreviewShot] = useState<ShotData | null>(null);
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
+  const [staleShotIds, setStaleShotIds] = useState<string[]>([]);
+  const [creditBalance, setCreditBalance] = useState<number | null>(null);
   const pauseRef = useRef(false);
+  const generationLockRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   // ─── Fetch shots and status ────────────────────────────────
 
@@ -122,6 +132,13 @@ export default function GeneratePage() {
         const charsData = await charsRes.json();
         if (charsData.success) setCharacters(charsData.data);
       }
+
+      // Fetch credit balance
+      try {
+        const creditsRes = await fetch("/api/credits?action=balance");
+        const creditsData = await creditsRes.json();
+        if (creditsData.success) setCreditBalance(creditsData.data.balance);
+      } catch { /* credits check is non-critical */ }
     } catch (error) {
       console.error("Failed to fetch generation status:", error);
     } finally {
@@ -131,6 +148,11 @@ export default function GeneratePage() {
 
   useEffect(() => {
     fetchStatus();
+    return () => {
+      // Cancel in-flight generation on unmount
+      abortRef.current?.abort();
+      generationLockRef.current = false;
+    };
   }, [fetchStatus]);
 
   // ─── Cost calculation ──────────────────────────────────────
@@ -171,7 +193,20 @@ export default function GeneratePage() {
           characterReferenceImages: matchedRefs.length > 0 ? matchedRefs : undefined,
         }),
       });
-      const data = await res.json();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let data: any;
+      try {
+        data = await res.json();
+      } catch {
+        // Server may have timed out or returned a non-JSON response
+        console.error("Failed to parse generation response (status:", res.status, ")");
+        setShots((prev) =>
+          prev.map((s) =>
+            s.id === shotId ? { ...s, status: "FAILED" } : s
+          )
+        );
+        return false;
+      }
       if (data.success) {
         // Update local state with the completed shot
         setShots((prev) =>
@@ -194,6 +229,23 @@ export default function GeneratePage() {
               }
             : prev
         );
+
+        // Notify header to refresh credits balance
+        window.dispatchEvent(new Event("credits-changed"));
+
+        // Fix 4: Track downstream stale shots
+        if (data.data.staleShotIds?.length > 0) {
+          setStaleShotIds(data.data.staleShotIds);
+          // Clear startFrameUrl in local state for stale shots
+          setShots((prev) =>
+            prev.map((s) =>
+              data.data.staleShotIds.includes(s.id)
+                ? { ...s, startFrameUrl: null }
+                : s
+            )
+          );
+        }
+
         return true;
       } else {
         console.error("Generation failed:", data.error);
@@ -218,35 +270,55 @@ export default function GeneratePage() {
 
   // ─── Generate all pending shots sequentially ───────────────
 
+  /**
+   * Core generation loop. Captures shot IDs at call time and iterates
+   * over them. Uses a lock ref to prevent concurrent loops, and an
+   * AbortController for cleanup on unmount.
+   */
+  async function runGenerationLoop(shotIds: string[], startIndex: number = 0) {
+    // Prevent concurrent generation loops
+    if (generationLockRef.current) return;
+    generationLockRef.current = true;
+    abortRef.current = new AbortController();
+
+    try {
+      for (let i = startIndex; i < shotIds.length; i++) {
+        if (pauseRef.current || abortRef.current.signal.aborted) {
+          if (!abortRef.current.signal.aborted) setGenState("paused");
+          return;
+        }
+
+        setCurrentShotIndex(i);
+
+        // Mark shot as generating in UI
+        setShots((prev) =>
+          prev.map((s) =>
+            s.id === shotIds[i] ? { ...s, status: "GENERATING" } : s
+          )
+        );
+
+        await generateShot(shotIds[i]);
+      }
+
+      setGenState("done");
+      setCurrentShotIndex(-1);
+      fetchStatus();
+    } catch (error) {
+      console.error("Generation loop error:", error);
+      setGenState("paused");
+    } finally {
+      generationLockRef.current = false;
+    }
+  }
+
   async function generateAll() {
     setConfirmOpen(false);
     setGenState("generating");
     pauseRef.current = false;
 
-    for (let i = 0; i < pendingShots.length; i++) {
-      if (pauseRef.current) {
-        setGenState("paused");
-        return;
-      }
-
-      setCurrentShotIndex(i);
-
-      // Mark shot as generating in UI
-      setShots((prev) =>
-        prev.map((s) =>
-          s.id === pendingShots[i].id
-            ? { ...s, status: "GENERATING" }
-            : s
-        )
-      );
-
-      await generateShot(pendingShots[i].id);
-    }
-
-    setGenState("done");
-    setCurrentShotIndex(-1);
-    // Refresh to get final state
-    fetchStatus();
+    // Capture IDs now — the loop uses these, not the live pendingShots array
+    const shotIds = pendingShots.map((s) => s.id);
+    await runGenerationLoop(shotIds);
   }
 
   function handlePause() {
@@ -255,35 +327,19 @@ export default function GeneratePage() {
   }
 
   function handleResume() {
-    // Resume from where we left off
-    const remaining = pendingShots.slice(currentShotIndex + 1);
-    if (remaining.length === 0) {
+    // Re-derive pending shot IDs from current state
+    const remainingIds = shots
+      .filter((s) => s.status === "DRAFT" || s.status === "FAILED")
+      .map((s) => s.id);
+
+    if (remainingIds.length === 0) {
       setGenState("done");
       return;
     }
+
     setGenState("generating");
     pauseRef.current = false;
-
-    (async () => {
-      for (let i = currentShotIndex + 1; i < pendingShots.length; i++) {
-        if (pauseRef.current) {
-          setGenState("paused");
-          return;
-        }
-        setCurrentShotIndex(i);
-        setShots((prev) =>
-          prev.map((s) =>
-            s.id === pendingShots[i].id
-              ? { ...s, status: "GENERATING" }
-              : s
-          )
-        );
-        await generateShot(pendingShots[i].id);
-      }
-      setGenState("done");
-      setCurrentShotIndex(-1);
-      fetchStatus();
-    })();
+    runGenerationLoop(remainingIds);
   }
 
   // ─── Loading state ─────────────────────────────────────────
@@ -300,23 +356,21 @@ export default function GeneratePage() {
 
   if (shots.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
-        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-primary/10">
-          <Film className="h-7 w-7 text-primary" />
-        </div>
-        <h2 className="text-xl font-semibold">No Shots to Generate</h2>
-        <p className="max-w-md text-sm text-muted-foreground">
-          Go back to the Storyboard and plan your shots first.
-        </p>
-        <Button
-          variant="secondary"
-          onClick={() =>
-            router.push(`/movies/${params.movieId}/storyboard`)
-          }
-        >
-          Go to Storyboard
-        </Button>
-      </div>
+      <EmptyState
+        icon={<Film className="h-7 w-7 text-primary" />}
+        title="No Shots to Generate"
+        description="Go back to the Storyboard and plan your shots first."
+        action={
+          <Button
+            variant="secondary"
+            onClick={() =>
+              router.push(`/movies/${params.movieId}/storyboard`)
+            }
+          >
+            Go to Storyboard
+          </Button>
+        }
+      />
     );
   }
 
@@ -396,19 +450,38 @@ export default function GeneratePage() {
               </TooltipContent>
             </Tooltip>
 
-            {/* Cost badge */}
+            {/* Cost & balance badge */}
             {pendingShots.length > 0 && (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <div className="flex items-center gap-1.5 rounded-lg border border-border/50 bg-background px-3 py-1.5">
-                    <Coins className="h-3.5 w-3.5 text-primary" />
+                  <div className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 ${
+                    creditBalance !== null && creditBalance < totalCost
+                      ? "border-destructive/50 bg-destructive/5"
+                      : "border-border/50 bg-background"
+                  }`}>
+                    <Coins className={`h-3.5 w-3.5 ${
+                      creditBalance !== null && creditBalance < totalCost
+                        ? "text-destructive"
+                        : "text-primary"
+                    }`} />
                     <span className="text-xs font-medium">
                       {totalCost} credits
                     </span>
+                    {creditBalance !== null && (
+                      <span className={`text-xs ${
+                        creditBalance < totalCost
+                          ? "text-destructive"
+                          : "text-muted-foreground"
+                      }`}>
+                        / {creditBalance} available
+                      </span>
+                    )}
                   </div>
                 </TooltipTrigger>
                 <TooltipContent className="text-xs">
-                  {pendingShots.length} shots remaining at {quality} quality
+                  {creditBalance !== null && creditBalance < totalCost
+                    ? `Insufficient credits — need ${totalCost - creditBalance} more`
+                    : `${pendingShots.length} shots remaining at ${quality} quality`}
                 </TooltipContent>
               </Tooltip>
             )}
@@ -475,6 +548,24 @@ export default function GeneratePage() {
         )}
       </div>
 
+      {/* Stale shots warning (Fix 4) */}
+      {staleShotIds.length > 0 && (
+        <div className="mx-6 mt-3 flex items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+          <AlertTriangle className="h-4 w-4 flex-shrink-0 text-amber-400" />
+          <p className="flex-1 text-sm text-amber-300">
+            {staleShotIds.length} downstream shot{staleShotIds.length !== 1 ? "s" : ""} may be visually inconsistent. Regenerating a shot breaks the continuity chain for subsequent shots.
+          </p>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-amber-400 hover:text-amber-300"
+            onClick={() => setStaleShotIds([])}
+          >
+            Dismiss
+          </Button>
+        </div>
+      )}
+
       {/* Shot list */}
       <div className="flex-1 overflow-y-auto px-6 py-4">
         <div className="mx-auto max-w-3xl space-y-2">
@@ -514,7 +605,7 @@ export default function GeneratePage() {
               {" "}This will use real credits via kie.ai.
             </DialogDescription>
           </DialogHeader>
-          <div className="rounded-lg border border-border bg-card/50 p-4">
+          <div className="rounded-lg border border-border bg-card/50 p-4 space-y-3">
             <div className="flex items-center justify-between">
               <div className="space-y-1">
                 <p className="text-sm font-medium">Cost Estimate</p>
@@ -528,12 +619,28 @@ export default function GeneratePage() {
                 <span className="text-xs text-muted-foreground">credits</span>
               </div>
             </div>
+            {creditBalance !== null && (
+              <div className="flex items-center justify-between border-t border-border/50 pt-2">
+                <span className="text-xs text-muted-foreground">Your balance</span>
+                <span className={`text-sm font-medium ${creditBalance < totalCost ? "text-destructive" : "text-foreground"}`}>
+                  {creditBalance} credits
+                </span>
+              </div>
+            )}
+            {creditBalance !== null && creditBalance < totalCost && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                Insufficient credits. You need {totalCost - creditBalance} more credits to generate all shots.
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="ghost" onClick={() => setConfirmOpen(false)}>
               Cancel
             </Button>
-            <Button onClick={generateAll}>
+            <Button
+              onClick={generateAll}
+              disabled={creditBalance !== null && creditBalance < totalCost}
+            >
               <Zap className="mr-1.5 h-4 w-4" />
               Generate
             </Button>
@@ -548,7 +655,7 @@ export default function GeneratePage() {
           if (!open) setPreviewShot(null);
         }}
       >
-        <DialogContent className="sm:max-w-2xl">
+        <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
               Shot {previewShot ? previewShot.order + 1 : ""} —{" "}
@@ -556,15 +663,50 @@ export default function GeneratePage() {
             </DialogTitle>
             <DialogDescription>{previewShot?.subject}</DialogDescription>
           </DialogHeader>
-          {previewShot?.takes?.[0] && (
-            <div className="overflow-hidden rounded-lg bg-black">
-              <video
-                src={previewShot.takes[0].videoUrl}
-                controls
-                autoPlay
-                className="w-full"
-              />
-            </div>
+          {previewShot && previewShot.takes.length > 0 && (
+            <TakeComparison
+              shotId={previewShot.id}
+              takes={previewShot.takes}
+              onSetHero={async (takeId) => {
+                const res = await fetch(`/api/shots/takes`, {
+                  method: "PATCH",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ takeId, shotId: previewShot.id, action: "setHero" }),
+                });
+                if (res.ok) {
+                  setShots((prev) =>
+                    prev.map((s) =>
+                      s.id === previewShot.id
+                        ? { ...s, takes: s.takes.map((t) => ({ ...t, isHero: t.id === takeId })) }
+                        : s
+                    )
+                  );
+                  setPreviewShot((prev) =>
+                    prev ? { ...prev, takes: prev.takes.map((t) => ({ ...t, isHero: t.id === takeId })) } : null
+                  );
+                }
+              }}
+              onDelete={async (takeId) => {
+                const res = await fetch(`/api/shots/takes?takeId=${takeId}`, { method: "DELETE" });
+                if (res.ok) {
+                  setShots((prev) =>
+                    prev.map((s) =>
+                      s.id === previewShot.id
+                        ? { ...s, takes: s.takes.filter((t) => t.id !== takeId) }
+                        : s
+                    )
+                  );
+                  setPreviewShot((prev) =>
+                    prev ? { ...prev, takes: prev.takes.filter((t) => t.id !== takeId) } : null
+                  );
+                }
+              }}
+              onRegenerate={() => {
+                setPreviewShot(null);
+                generateShot(previewShot.id);
+              }}
+              disabled={generatingIds.has(previewShot.id)}
+            />
           )}
           {previewShot?.generatedPrompt && (
             <div className="rounded-lg border border-border/50 bg-card/50 p-3">
@@ -678,6 +820,23 @@ function ShotGenerationCard({
               {shot.durationSeconds}s
             </span>
             <span className="truncate">{shot.cameraMovement}</span>
+            {/* Chain status badge (Fix 6) */}
+            {index === 0 ? (
+              <span className="flex items-center gap-1 text-neutral-500">
+                <span className="h-1.5 w-1.5 rounded-full bg-neutral-500" />
+                First shot
+              </span>
+            ) : shot.status === "COMPLETE" && shot.startFrameUrl ? (
+              <span className="flex items-center gap-1 text-green-500">
+                <Link2 className="h-3 w-3" />
+                Chained
+              </span>
+            ) : shot.status === "COMPLETE" && !shot.startFrameUrl ? (
+              <span className="flex items-center gap-1 text-red-400">
+                <Unlink className="h-3 w-3" />
+                Unchained
+              </span>
+            ) : null}
           </div>
           {isCurrentlyGenerating && (
             <p className="mt-1 text-xs text-primary animate-pulse">
@@ -688,7 +847,7 @@ function ShotGenerationCard({
 
         {/* Actions */}
         <div className="flex items-center gap-2 flex-shrink-0">
-          {shot.status === "DRAFT" && (
+          {shot.status === "DRAFT" && !isCurrentlyGenerating && (
             <>
               <span className="text-xs text-muted-foreground">
                 {cost} cr
@@ -704,7 +863,7 @@ function ShotGenerationCard({
               </Button>
             </>
           )}
-          {shot.status === "FAILED" && (
+          {shot.status === "FAILED" && !isCurrentlyGenerating && (
             <Button
               size="sm"
               variant="secondary"
@@ -715,7 +874,13 @@ function ShotGenerationCard({
               Retry
             </Button>
           )}
-          {shot.status === "COMPLETE" && (
+          {isCurrentlyGenerating && (
+            <Button size="sm" variant="secondary" disabled>
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+              Generating...
+            </Button>
+          )}
+          {shot.status === "COMPLETE" && !isCurrentlyGenerating && (
             <div className="flex items-center gap-2">
               <Badge
                 variant="outline"
