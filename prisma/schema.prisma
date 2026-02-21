@@ -130,7 +130,8 @@ model Character {
   role              String?
   visualDescription String   @db.Text
   referenceImages   String[]
-  generatedReferenceUrl String?  // frame from first generated appearance
+  generatedReferenceUrl  String?  // frame from first generated appearance
+  sceneReferenceFrames   Json?    // { "0": "url", "1": "url" } — best frame per scene
   voiceProfile      Json?
   styleBibleEntry   String?  @db.Text
   klingElementId    String?

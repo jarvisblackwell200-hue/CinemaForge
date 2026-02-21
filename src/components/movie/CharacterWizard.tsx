@@ -88,6 +88,14 @@ interface FormFields {
 // Constants
 // ---------------------------------------------------------------------------
 
+/** Recommended angles for reference images — guides users toward multi-angle coverage. */
+const ANGLE_GUIDES = [
+  { label: "Front", hint: "Face straight-on" },
+  { label: "3/4 View", hint: "Slightly turned" },
+  { label: "Side", hint: "Profile view" },
+  { label: "Action", hint: "Full body / pose" },
+] as const;
+
 const ROLES: { value: Role; label: string; description: string }[] = [
   { value: "protagonist", label: "Protagonist", description: "Main character driving the story" },
   { value: "antagonist", label: "Antagonist", description: "Opposes the protagonist" },
@@ -301,23 +309,29 @@ export function CharacterWizard({
   interface ConsistencyItem {
     field: string;
     filled: boolean;
+    weight: number;
     warning: string;
   }
 
   const consistencyItems = useMemo<ConsistencyItem[]>(() => [
-    { field: "Age range", filled: fields.ageRange !== "", warning: "Without age range, character age may vary between shots." },
-    { field: "Gender", filled: fields.gender !== "", warning: "Without gender, character appearance may be inconsistent." },
-    { field: "Build", filled: fields.build !== "", warning: "Without build, body type may change between shots." },
-    { field: "Skin tone", filled: fields.skinTone.trim() !== "", warning: "Without skin tone, complexion may vary between shots." },
-    { field: "Hair color", filled: fields.hairColor.trim() !== "", warning: "Without hair color, character may vary between shots." },
-    { field: "Hair style", filled: fields.hairStyle !== "", warning: "Without hair style, hairstyle may change between shots." },
-    { field: "Clothing", filled: fields.clothing.trim() !== "", warning: "Without clothing details, wardrobe may be inconsistent." },
-    { field: "Reference image", filled: hasRefImage, warning: "A reference image greatly improves character consistency." },
-  ], [fields, hasRefImage]);
+    { field: "Age range", filled: fields.ageRange !== "", weight: 1, warning: "Without age range, character age may vary between shots." },
+    { field: "Gender", filled: fields.gender !== "", weight: 1, warning: "Without gender, character appearance may be inconsistent." },
+    { field: "Build", filled: fields.build !== "", weight: 1, warning: "Without build, body type may change between shots." },
+    { field: "Skin tone", filled: fields.skinTone.trim() !== "", weight: 1, warning: "Without skin tone, complexion may vary between shots." },
+    { field: "Hair color", filled: fields.hairColor.trim() !== "", weight: 1, warning: "Without hair color, character may vary between shots." },
+    { field: "Hair style", filled: fields.hairStyle !== "", weight: 1, warning: "Without hair style, hairstyle may change between shots." },
+    { field: "Clothing", filled: fields.clothing.trim() !== "", weight: 1, warning: "Without clothing details, wardrobe may be inconsistent." },
+    { field: "Reference image (1st)", filled: referenceImages.length >= 1, weight: 2, warning: "A reference image greatly improves character consistency." },
+    { field: "Reference image (2nd)", filled: referenceImages.length >= 2, weight: 2, warning: "Upload 2-4 images from different angles for best face-locking." },
+    { field: "Reference images (3-4)", filled: referenceImages.length >= 3, weight: 1, warning: "Additional angles further improve consistency." },
+  ], [fields, referenceImages.length]);
 
   const consistencyScore = useMemo(() => {
-    const filled = consistencyItems.filter((i) => i.filled).length;
-    return Math.round((filled / consistencyItems.length) * 100);
+    const totalWeight = consistencyItems.reduce((sum, i) => sum + i.weight, 0);
+    const filledWeight = consistencyItems
+      .filter((i) => i.filled)
+      .reduce((sum, i) => sum + i.weight, 0);
+    return Math.round((filledWeight / totalWeight) * 100);
   }, [consistencyItems]);
 
   // -----------------------------------------------------------------------
@@ -577,74 +591,92 @@ export function CharacterWizard({
               </div>
             </div>
 
-            {/* Reference image upload */}
+            {/* Reference images with angle guidance */}
             <div>
-              <FieldLabel>Reference Image</FieldLabel>
-              {referenceImages.length > 0 ? (
-                <div className="space-y-3">
-                  <div className="flex gap-2 flex-wrap">
-                    {referenceImages.map((url, i) => (
-                      <div
-                        key={i}
-                        className="group/img relative h-20 w-20 overflow-hidden rounded-lg border border-border bg-black"
-                      >
-                        <img
-                          src={url}
-                          alt={`Reference ${i + 1}`}
-                          className="h-full w-full object-cover"
-                        />
+              <FieldLabel>Reference Images</FieldLabel>
+              <p className="mb-2 text-xs text-muted-foreground">
+                Upload 2-4 images from different angles for reliable face-locking across shots.
+              </p>
+              <div className="grid grid-cols-4 gap-2">
+                {ANGLE_GUIDES.map((guide, slotIdx) => {
+                  const img = referenceImages[slotIdx];
+                  return (
+                    <div key={guide.label} className="flex flex-col items-center gap-1">
+                      {img ? (
+                        <div className="group/img relative h-20 w-20 overflow-hidden rounded-lg border border-border bg-black">
+                          <img
+                            src={img}
+                            alt={`${guide.label} reference`}
+                            className="h-full w-full object-cover"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => removeReferenceImage(slotIdx)}
+                            className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity group-hover/img:opacity-100 hover:bg-destructive"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ) : (
                         <button
                           type="button"
-                          onClick={() => removeReferenceImage(i)}
-                          className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity group-hover/img:opacity-100 hover:bg-destructive"
+                          onClick={() => fileInputRef.current?.click()}
+                          disabled={uploading}
+                          onDragOver={(e) => e.preventDefault()}
+                          onDrop={handleDrop}
+                          className="flex h-20 w-20 flex-col items-center justify-center gap-0.5 rounded-lg border-2 border-dashed border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
                         >
-                          <X className="h-3 w-3" />
+                          {uploading ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            <Upload className="h-4 w-4" />
+                          )}
                         </button>
-                      </div>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={uploading}
-                      className="flex h-20 w-20 items-center justify-center rounded-lg border-2 border-dashed border-border text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-                    >
-                      {uploading ? (
-                        <Loader2 className="h-5 w-5 animate-spin" />
-                      ) : (
-                        <Upload className="h-5 w-5" />
                       )}
-                    </button>
-                  </div>
-                  <p className="text-xs text-green-500 flex items-center gap-1">
-                    <Check className="h-3 w-3" />
-                    Reference image added -- you can skip the appearance form
-                  </p>
-                </div>
-              ) : (
-                <div
-                  onDragOver={(e) => e.preventDefault()}
-                  onDrop={handleDrop}
-                  className="flex flex-col items-center gap-2 rounded-lg border-2 border-dashed border-border py-6 transition-colors hover:border-primary/40"
-                >
-                  {uploading ? (
-                    <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-                  ) : (
-                    <Upload className="h-6 w-6 text-muted-foreground/50" />
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    Drag an image here or{" "}
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="text-primary underline underline-offset-2 hover:text-primary/80"
+                      <span className="text-[10px] font-medium text-muted-foreground">
+                        {guide.label}
+                      </span>
+                      <span className="text-[9px] text-muted-foreground/60">
+                        {guide.hint}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              {/* Extra images beyond 4 */}
+              {referenceImages.length > 4 && (
+                <div className="mt-2 flex gap-2 flex-wrap">
+                  {referenceImages.slice(4).map((url, i) => (
+                    <div
+                      key={i + 4}
+                      className="group/img relative h-16 w-16 overflow-hidden rounded-lg border border-border bg-black"
                     >
-                      browse
-                    </button>
-                  </p>
-                  <p className="text-[10px] text-muted-foreground/60">
-                    Upload a photo to skip the appearance form
-                  </p>
+                      <img src={url} alt={`Extra reference ${i + 1}`} className="h-full w-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => removeReferenceImage(i + 4)}
+                        className="absolute right-0.5 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity group-hover/img:opacity-100 hover:bg-destructive"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
                 </div>
+              )}
+              {referenceImages.length > 0 && (
+                <p className="mt-2 text-xs flex items-center gap-1">
+                  {referenceImages.length >= 2 ? (
+                    <span className="text-green-500 flex items-center gap-1">
+                      <Check className="h-3 w-3" />
+                      {referenceImages.length} images -- face-locking enabled. You can skip the appearance form.
+                    </span>
+                  ) : (
+                    <span className="text-amber-400 flex items-center gap-1">
+                      <AlertTriangle className="h-3 w-3" />
+                      1 image uploaded -- add at least 1 more for face-locking to work.
+                    </span>
+                  )}
+                </p>
               )}
             </div>
 
@@ -885,6 +917,16 @@ export function CharacterWizard({
                         <Check className="mr-1 h-2.5 w-2.5" />
                         {referenceImages.length} image{referenceImages.length !== 1 ? "s" : ""}
                       </Badge>
+                      {referenceImages.length === 1 && (
+                        <span className="text-[10px] text-amber-400">
+                          Upload 2-4 images from different angles for best face-locking
+                        </span>
+                      )}
+                      {referenceImages.length >= 2 && referenceImages.length < 4 && (
+                        <span className="text-[10px] text-muted-foreground">
+                          {4 - referenceImages.length} more image{4 - referenceImages.length !== 1 ? "s" : ""} recommended for optimal consistency
+                        </span>
+                      )}
                       <Button
                         size="sm"
                         variant="ghost"

@@ -1,6 +1,6 @@
 "use client";
 
-import { Trash2, Edit, Users, Image as ImageIcon } from "lucide-react";
+import { Trash2, Edit, Users, Image as ImageIcon, AlertTriangle } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -117,10 +117,20 @@ export function CharacterCard({
           {character.role && (
             <Badge
               variant="outline"
-              className={`mb-3 capitalize ${roleColorClass}`}
+              className={`mb-2 capitalize ${roleColorClass}`}
             >
               {character.role}
             </Badge>
+          )}
+
+          {/* Face-locking warning */}
+          {character.referenceImages.length < 2 && (
+            <div className="mb-2 flex items-center gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-[10px] text-amber-400">
+              <AlertTriangle className="h-3 w-3 flex-shrink-0" />
+              {character.referenceImages.length === 0
+                ? "No reference images — face-locking disabled"
+                : "1 image — add 1 more for face-locking"}
+            </div>
           )}
 
           {/* Visual description (truncated) */}

@@ -121,6 +121,7 @@ export async function executeGeneration(
       referenceImages: true,
       voiceProfile: true,
       generatedReferenceUrl: true,
+      sceneReferenceFrames: true,
     },
   });
 
@@ -189,10 +190,11 @@ export async function executeGeneration(
   });
 
   // ─── Continuity chaining ───────────────────────────────────
-  // Only chain from the previous shot if it's in the SAME scene.
-  // New scenes should start fresh to allow different locations/moods.
-  let startImageUrl: string | undefined;
+  // Continuity frames are collected here but fed through the scene element
+  // pipeline (not as startImageUrl) to avoid triggering kie.ai's
+  // image-to-video mode which overrides the style bible. (#77)
   let chainSource: "chain" | "scene" | "character" | "none" = "none";
+  let continuityFrameUrl: string | undefined;
 
   if (shot.order > 0) {
     const prevShot = await db.shot.findFirst({
@@ -207,12 +209,12 @@ export async function executeGeneration(
     // Only chain if same scene — different scenes should look distinct
     if (prevShot && prevShot.sceneIndex === shot.sceneIndex) {
       if (prevShot.endFrameUrl) {
-        startImageUrl = prevShot.endFrameUrl;
+        continuityFrameUrl = prevShot.endFrameUrl;
         chainSource = "chain";
       } else if (prevShot.takes?.[0]?.videoUrl) {
         const frameUrl = await extractLastFrame(prevShot.takes[0].videoUrl);
         if (frameUrl) {
-          startImageUrl = frameUrl;
+          continuityFrameUrl = frameUrl;
           chainSource = "chain";
           await db.shot.updateMany({
             where: { movieId: shot.movieId, order: shot.order - 1 },
@@ -224,12 +226,11 @@ export async function executeGeneration(
   }
 
   // Scene-level reference frame fallback
-  let sceneFrames: Record<string, string> = {};
-  if (!startImageUrl) {
-    sceneFrames = (shot.movie.sceneReferenceFrames as Record<string, string>) ?? {};
+  if (!continuityFrameUrl) {
+    const sceneFrames = (shot.movie.sceneReferenceFrames as Record<string, string>) ?? {};
     const sceneFrame = sceneFrames[String(shot.sceneIndex)];
     if (sceneFrame) {
-      startImageUrl = sceneFrame;
+      continuityFrameUrl = sceneFrame;
       chainSource = "scene";
     }
   }
@@ -257,9 +258,14 @@ export async function executeGeneration(
       continue;
     }
 
+    // Merge per-scene reference frame if available (non-sequential continuity)
+    const charSceneFrames = (char.sceneReferenceFrames as Record<string, string> | null) ?? {};
+    const charSceneFrame = charSceneFrames[String(shot.sceneIndex)];
+
     const urls = filterSupportedImageUrls([
       ...char.referenceImages,
       ...(char.generatedReferenceUrl ? [char.generatedReferenceUrl] : []),
+      ...(charSceneFrame ? [charSceneFrame] : []),
     ]);
     if (urls.length >= 2) {
       // kie.ai requires 2–4 images per element for face-locking
@@ -275,21 +281,42 @@ export async function executeGeneration(
   }
 
   // ─── Build scene element ──────────────────────────────────
+  // Merges scene pack images + continuity frame into a single scene element.
+  // This keeps continuity in the element pipeline (not startImageUrl) to
+  // avoid kie.ai's image-to-video mode overriding the style bible. (#77)
   const scenePacks = (shot.movie.scenePacks as ScenePack[] | null) ?? [];
   const scenePack = scenePacks.find((sp) => sp.sceneIndex === shot.sceneIndex);
 
-  if (scenePack && scenePack.status === "complete") {
-    const sceneImageUrls = filterSupportedImageUrls(
-      scenePack.images
-        .filter((img) => img.status === "complete" && img.imageUrl)
-        .map((img) => img.imageUrl!),
-    );
+  {
+    const sceneImageUrls: string[] = [];
+
+    // Scene pack images (pre-generated environment references)
+    if (scenePack && scenePack.status === "complete") {
+      sceneImageUrls.push(
+        ...filterSupportedImageUrls(
+          scenePack.images
+            .filter((img) => img.status === "complete" && img.imageUrl)
+            .map((img) => img.imageUrl!),
+        ),
+      );
+    }
+
+    // Continuity frame — merged into scene element instead of startImageUrl
+    if (continuityFrameUrl) {
+      const filtered = filterSupportedImageUrls([continuityFrameUrl]);
+      for (const url of filtered) {
+        if (!sceneImageUrls.includes(url)) {
+          sceneImageUrls.push(url);
+        }
+      }
+    }
 
     // kie.ai requires 2-4 images per element
     if (sceneImageUrls.length >= 2) {
+      const elementName = scenePack?.elementName ?? `element_scene_${shot.sceneIndex}`;
       const envDesc = shot.environment ?? "scene";
       elements.push({
-        name: scenePack.elementName,
+        name: elementName,
         description: truncateAtWordBoundary(
           `${envDesc} — environment and setting`,
           100,
@@ -299,23 +326,24 @@ export async function executeGeneration(
     }
   }
 
-  // NOTE: Character reference images are intentionally NOT used as startImageUrl.
-  // Using them as start frames triggers kie.ai's image-to-video mode, which makes
-  // the reference image dominate the output's visual style — overriding the style
-  // bible (film stock, color grade, textures). Character refs should only flow
-  // through kling_elements for face-locking, which works alongside the style bible.
+  // NOTE: Continuity frames and character reference images are intentionally
+  // NOT used as startImageUrl. Using them triggers kie.ai's image-to-video
+  // mode, which makes the reference dominate the output's visual style —
+  // overriding the style bible. Both flow through kling_elements instead. (#77)
 
-  // Populate startFrameUrl for chain visibility
-  if (startImageUrl) {
+  // Populate startFrameUrl for chain visibility (tracking only, not used as startImageUrl)
+  if (continuityFrameUrl) {
     await db.shot.update({
       where: { id: shot.id },
-      data: { startFrameUrl: startImageUrl },
+      data: { startFrameUrl: continuityFrameUrl },
     });
   }
 
   // ─── Generate video ────────────────────────────────────────
   const creditCost = getCreditCost(quality, shot.durationSeconds);
 
+  // Continuity flows through kling_elements (not startImageUrl) to preserve
+  // the style bible. startImageUrl is omitted intentionally. (#77)
   const result = await generateVideo({
     prompt: finalPrompt,
     negativePrompt: negativePrompt || undefined,
@@ -323,7 +351,6 @@ export async function executeGeneration(
     aspectRatio: (shot.movie.aspectRatio as "16:9" | "9:16" | "1:1") ?? "16:9",
     quality,
     generateAudio,
-    startImageUrl,
     elements: elements.length > 0 ? elements : undefined,
   });
 
@@ -426,10 +453,16 @@ export async function executeGeneration(
   }
 
   // Store generated reference for characters appearing for the first time (batch update)
+  // AND per-scene reference frames for non-sequential continuity (#75)
   if (endFrameUrl) {
-    const shotText = `${shot.subject} ${shot.action}`.toLowerCase();
-    const charIdsNeedingRef = characters
-      .filter((c) => !c.generatedReferenceUrl && shotText.includes(c.name.toLowerCase()))
+    const shotTextLower = `${shot.subject} ${shot.action}`.toLowerCase();
+    const mentionedChars = characters.filter((c) =>
+      shotTextLower.includes(c.name.toLowerCase()),
+    );
+
+    // Global first-appearance reference (existing behavior)
+    const charIdsNeedingRef = mentionedChars
+      .filter((c) => !c.generatedReferenceUrl)
       .map((c) => c.id);
     if (charIdsNeedingRef.length > 0) {
       await db.character.updateMany({
@@ -437,24 +470,41 @@ export async function executeGeneration(
         data: { generatedReferenceUrl: endFrameUrl },
       });
     }
+
+    // Per-scene reference frames — first-write-wins per character per scene
+    const sceneKey = String(shot.sceneIndex);
+    for (const char of mentionedChars) {
+      const existing = (char.sceneReferenceFrames as Record<string, string> | null) ?? {};
+      if (!existing[sceneKey]) {
+        await db.character.update({
+          where: { id: char.id },
+          data: {
+            sceneReferenceFrames: { ...existing, [sceneKey]: endFrameUrl },
+          },
+        });
+      }
+    }
   }
 
-  // Only invalidate the immediately next shot's continuity chain
-  // (not all downstream — they may be chained from scene refs or character refs)
+  // Invalidate all downstream shots in the same scene that have stale
+  // continuity chains. When shot N regenerates, shots N+1, N+2, ... in the
+  // same scene all have startFrameUrls derived from the old version. (#78)
   const staleShotIds: string[] = [];
-  const nextShot = await db.shot.findFirst({
+  const staleShots = await db.shot.findMany({
     where: {
       movieId: shot.movieId,
-      order: shot.order + 1,
+      sceneIndex: shot.sceneIndex,
+      order: { gt: shot.order },
       startFrameUrl: { not: null },
       status: "COMPLETE",
     },
     select: { id: true },
   });
-  if (nextShot) {
-    staleShotIds.push(nextShot.id);
-    await db.shot.update({
-      where: { id: nextShot.id },
+  if (staleShots.length > 0) {
+    const ids = staleShots.map((s) => s.id);
+    staleShotIds.push(...ids);
+    await db.shot.updateMany({
+      where: { id: { in: ids } },
       data: { startFrameUrl: null },
     });
   }

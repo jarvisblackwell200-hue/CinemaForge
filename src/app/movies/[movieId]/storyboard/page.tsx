@@ -143,6 +143,40 @@ interface CharacterData {
   referenceImages: string[];
 }
 
+// ─── Character mention detection (#79) ──────────────────────────
+
+const PERSON_WORDS = /\b(man|woman|person|figure|boy|girl|child|stranger|detective|officer|soldier|doctor|nurse|hero|villain|warrior|king|queen|prince|princess|old man|old woman|young man|young woman|elderly|teenager)\b/i;
+
+/**
+ * Returns names of characters with reference images that should be
+ * element-linked but aren't mentioned by name in the shot text.
+ * Empty array = no issues.
+ */
+function detectUnlinkedCharacters(
+  shot: ShotData,
+  characters: CharacterData[],
+): string[] {
+  if (characters.length === 0) return [];
+  const text = `${shot.subject} ${shot.action}`.toLowerCase();
+
+  // If no person-like words, this is an establishing/environment shot — no warning
+  if (!PERSON_WORDS.test(text)) return [];
+
+  // Check which characters with refs are NOT mentioned by name
+  const charsWithRefs = characters.filter((c) => c.referenceImages.length > 0);
+  if (charsWithRefs.length === 0) return [];
+
+  const unlinked = charsWithRefs.filter((c) => {
+    const nameLower = c.name.toLowerCase();
+    if (text.includes(nameLower)) return false;
+    // Check partial name match (first/last name)
+    const parts = nameLower.split(/\s+/).filter((p) => p.length >= 3);
+    return !parts.some((part) => new RegExp(`\\b${part}\\b`).test(text));
+  });
+
+  return unlinked.map((c) => c.name);
+}
+
 // ─── Component ──────────────────────────────────────────────────
 
 export default function StoryboardPage() {
@@ -1268,6 +1302,22 @@ export default function StoryboardPage() {
                           )}
                           genre={movie?.genre}
                         />
+
+                        {/* Unlinked character warning (#79) */}
+                        {(() => {
+                          const unlinked = detectUnlinkedCharacters(shot, characters);
+                          if (unlinked.length === 0) return null;
+                          return (
+                            <div className="mt-1 ml-6 flex items-center gap-2 rounded border border-yellow-500/20 bg-yellow-500/5 px-3 py-1.5">
+                              <AlertTriangle className="h-3 w-3 shrink-0 text-yellow-500" />
+                              <span className="text-[11px] text-yellow-500/90">
+                                Shot mentions a person but doesn&apos;t name{" "}
+                                <strong>{unlinked.join(", ")}</strong> — face-locking won&apos;t activate.
+                                Use character names in the subject/action.
+                              </span>
+                            </div>
+                          );
+                        })()}
 
                         {/* Inline prompt preview when expanded */}
                         {expandedShot === originalIndex && (
