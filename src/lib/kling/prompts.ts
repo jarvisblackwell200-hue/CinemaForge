@@ -22,46 +22,61 @@ interface PromptShot {
    *  This prevents Kling from visually depicting speech when audio generation is off.
    *  Defaults to true for backward compatibility. */
   includeDialogue?: boolean;
+  /** Element name for scene environment reference (e.g. "element_scene_0").
+   *  When set, @element_scene_N is injected into the environment block. */
+  sceneElementName?: string;
 }
 
 /**
  * Assembles a complete video generation prompt from structured shot data.
  * Used with kie.ai's Kling 3.0 model.
  *
- * Order is critical for quality:
- * 1. Camera/Shot type → HOW the audience sees it
+ * Order follows official Kling prompt guidance (Scene-first grounding):
+ * 1. Environment/Scene → WHERE — grounds the model in spatial context first
  * 2. Subject → WHO is on screen (with @Element references)
- * 3. Action → WHAT happens (beginning → middle → end)
- * 4. Environment → WHERE (location, time, weather)
- * 5. Lighting → specific light sources
- * 6. Style Bible → appended last (film stock, grade, texture)
+ * 3. Action → WHAT happens (beginning → middle → end, temporal timeline)
+ * 4. Camera → HOW the audience sees it (movement relative to subject)
+ * 5. Dialogue → AUDIO — speaker labels with voice descriptions
+ * 6. Lighting → specific light sources
+ * 7. Style Bible → appended last (film stock, grade, texture)
  */
 export function assemblePrompt(
   shot: PromptShot,
   characters: PromptCharacter[],
-  styleBible: StyleBible | null
+  styleBible: StyleBible | null,
+  voiceProfiles?: Record<string, { language?: string; accent?: string; tone?: string; speed?: string }>,
 ): string {
   const blocks: string[] = [];
 
-  // 1. CAMERA BLOCK
-  const cameraBlock = buildCameraBlock(shot.shotType, shot.cameraMovement);
-  if (cameraBlock) blocks.push(cameraBlock);
+  // 1. ENVIRONMENT — grounds the model in spatial/temporal context first,
+  //    with scene element reference if available
+  if (shot.environment || shot.sceneElementName) {
+    let envBlock = shot.environment ?? "";
+    if (shot.sceneElementName) {
+      envBlock = `@${shot.sceneElementName} ${envBlock}`.trim();
+    }
+    if (envBlock) blocks.push(envBlock);
+  }
 
-  // 2. SUBJECT BLOCK
+  // 2. SUBJECT BLOCK — who is on screen, with @element references
   const subjectBlock = buildSubjectBlock(shot.subject, characters);
   if (subjectBlock) blocks.push(subjectBlock);
 
-  // 3. ACTION BLOCK
-  if (shot.action) blocks.push(shot.action);
+  // 3. ACTION BLOCK — enriched for duration, temporal timeline
+  if (shot.action) blocks.push(enrichActionForDuration(shot.action, shot.durationSeconds));
 
-  // 4. DIALOGUE (inline with action) — only when audio generation is enabled
+  // 4. CAMERA BLOCK — how the audience sees it, relative to subject
+  const cameraBlock = buildCameraBlock(shot.shotType, shot.cameraMovement);
+  if (cameraBlock) blocks.push(cameraBlock);
+
+  // 5. DIALOGUE — speaker labels with voice descriptions (only when audio is on)
   if (shot.includeDialogue !== false) {
-    const dialogueBlock = formatDialogue(shot.dialogue ?? null);
+    const voiceProfile = shot.dialogue?.characterId
+      ? voiceProfiles?.[shot.dialogue.characterId]
+      : undefined;
+    const dialogueBlock = formatDialogue(shot.dialogue ?? null, voiceProfile);
     if (dialogueBlock) blocks.push(dialogueBlock);
   }
-
-  // 5. ENVIRONMENT
-  if (shot.environment) blocks.push(shot.environment);
 
   // 6. LIGHTING
   if (shot.lighting) blocks.push(shot.lighting);
@@ -69,7 +84,10 @@ export function assemblePrompt(
   // 7. STYLE BIBLE — always last
   if (styleBible?.styleString) blocks.push(styleBible.styleString);
 
-  return blocks.filter(Boolean).join(". ").replace(/\.\./g, ".").trim();
+  return blocks.filter(Boolean).join(". ")
+    .replace(/\.(\s*\.)+/g, ".")  // collapse ". .", "..", "..." into single "."
+    .replace(/\s{2,}/g, " ")      // collapse multiple spaces
+    .trim();
 }
 
 /**
@@ -87,7 +105,7 @@ function buildCameraBlock(shotType: string, cameraMovement: string): string {
 
 /**
  * Builds the subject block with @Element references for Kling.
- * Characters mentioned in the subject get their @Name annotation.
+ * Characters mentioned in the subject get their @element_name annotation.
  * Does NOT re-describe what's in reference images.
  *
  * NOTE: The @Element injection works when character elements are passed to kie.ai.
@@ -101,27 +119,103 @@ export function buildSubjectBlock(
   let result = subject;
 
   for (const char of characters) {
-    // If the character is mentioned by name, add @element_ reference for kie.ai elements
-    const namePattern = new RegExp(`\\b${escapeRegex(char.name)}\\b`, "gi");
-    if (namePattern.test(result) && char.hasReferenceImages) {
-      const elementName = `element_${char.name.toLowerCase().replace(/\s+/g, "_")}`;
-      result = result.replace(
-        namePattern,
-        `@${elementName}`
+    if (!char.hasReferenceImages) continue;
+
+    const elementName = `element_${char.name.toLowerCase().replace(/\s+/g, "_")}`;
+
+    // Strategy 1: Replace "Name, exact visual description" (legacy subjects)
+    // This precisely strips the description that duplicates reference images.
+    const descPattern = new RegExp(
+      `\\b${escapeRegex(char.name)}\\b,\\s*${escapeRegex(char.visualDescription)}`,
+      "gi"
+    );
+    if (descPattern.test(result)) {
+      descPattern.lastIndex = 0; // Reset lastIndex after .test() with 'g' flag
+      result = result.replace(descPattern, `@${elementName}`);
+    } else {
+      // Strategy 2: Replace "Name, <text>" up to " and " boundary (reformatted descriptions)
+      const nameCommaAndPattern = new RegExp(
+        `\\b${escapeRegex(char.name)}\\b,\\s+[^@]*?(?=\\s+and\\s+)`,
+        "gi"
       );
+      if (nameCommaAndPattern.test(result)) {
+        nameCommaAndPattern.lastIndex = 0;
+        result = result.replace(nameCommaAndPattern, `@${elementName}`);
+      } else {
+        // Strategy 3: Replace just the name
+        const namePattern = new RegExp(`\\b${escapeRegex(char.name)}\\b`, "gi");
+        result = result.replace(namePattern, `@${elementName}`);
+      }
     }
   }
 
-  return result;
+  // Check for partial name matches that weren't caught by direct replacement
+  const mentionedChars = findMentionedCharacters(result, characters);
+  for (const char of mentionedChars) {
+    if (!char.hasReferenceImages) continue;
+    const elementName = `element_${char.name.toLowerCase().replace(/\s+/g, "_")}`;
+    // If element ref not already in the result, append a grounding mention
+    if (!result.includes(`@${elementName}`)) {
+      result += `. @${elementName} is present in the scene`;
+    }
+  }
+
+  return result.replace(/\s{2,}/g, " ").trim();
+}
+
+/**
+ * Find characters mentioned in text by full name, first name, or last name.
+ * Returns the matched characters (no duplicates).
+ */
+function findMentionedCharacters(
+  text: string,
+  characters: PromptCharacter[]
+): PromptCharacter[] {
+  const lower = text.toLowerCase();
+  const found = new Map<string, PromptCharacter>();
+
+  for (const char of characters) {
+    // Full name match (highest priority)
+    if (lower.includes(char.name.toLowerCase())) {
+      found.set(char.id, char);
+      continue;
+    }
+
+    // Partial name match — split "Marcus Chen" into ["Marcus", "Chen"]
+    const parts = char.name.split(/\s+/).filter((p) => p.length >= 3);
+    for (const part of parts) {
+      const partPattern = new RegExp(`\\b${escapeRegex(part)}\\b`, "i");
+      if (partPattern.test(text)) {
+        found.set(char.id, char);
+        break;
+      }
+    }
+  }
+
+  return Array.from(found.values());
 }
 
 /**
  * Formats dialogue for native audio generation.
  * Format: [Character Name, voice description]: "Line"
+ *
+ * When a voiceProfile is provided (from Character.voiceProfile), its fields
+ * are woven into the voice description for richer audio control.
  */
-export function formatDialogue(dialogue: ShotDialogue | null): string {
+export function formatDialogue(
+  dialogue: ShotDialogue | null,
+  voiceProfile?: { language?: string; accent?: string; tone?: string; speed?: string } | null,
+): string {
   if (!dialogue) return "";
-  return `[${dialogue.characterName}, ${dialogue.emotion} voice]: "${dialogue.line}"`;
+  if (!dialogue.characterName?.trim() || !dialogue.line?.trim()) return "";
+
+  const voiceParts: string[] = [dialogue.emotion];
+  if (voiceProfile?.tone) voiceParts.push(voiceProfile.tone);
+  if (voiceProfile?.accent) voiceParts.push(`${voiceProfile.accent} accent`);
+  if (voiceProfile?.speed && voiceProfile.speed !== "normal") voiceParts.push(`${voiceProfile.speed} pace`);
+  const voiceDesc = voiceParts.join(", ");
+
+  return `[${dialogue.characterName}, ${voiceDesc} voice]: "${dialogue.line}"`;
 }
 
 /**
@@ -219,14 +313,30 @@ export function validatePrompt(
     warnings.push("Shots over 8 seconds have higher artifact risk");
   }
 
-  // Check character references
-  const mentionedCharacters = characters.filter((c) =>
-    prompt.toLowerCase().includes(c.name.toLowerCase())
-  );
+  // Check character references (by name or @element tag)
+  const mentionedCharacters = characters.filter((c) => {
+    const lowerPrompt = prompt.toLowerCase();
+    const elementName = `element_${c.name.toLowerCase().replace(/\s+/g, "_")}`;
+    return lowerPrompt.includes(c.name.toLowerCase()) || prompt.includes(`@${elementName}`);
+  });
   const characterCoverage = mentionedCharacters.length > 0 || characters.length === 0;
 
   if (characters.length > 0 && mentionedCharacters.length === 0) {
     warnings.push("No characters referenced — is this an establishing shot?");
+  }
+
+  // Check element references specifically for characters with face references
+  const charsWithElements = characters.filter((c) => c.hasReferenceImages);
+  const missingElements = charsWithElements.filter((c) => {
+    const elementName = `element_${c.name.toLowerCase().replace(/\s+/g, "_")}`;
+    return !prompt.includes(`@${elementName}`);
+  });
+
+  if (missingElements.length > 0) {
+    warnings.push(
+      `Characters with face references not tagged in prompt: ${missingElements.map((c) => c.name).join(", ")}. ` +
+      `Element binding may not activate.`
+    );
   }
 
   // Check style bible
@@ -253,6 +363,37 @@ export function validatePrompt(
     characterCoverage,
     estimatedQuality,
   };
+}
+
+/**
+ * Regex matching common temporal/progression language in action descriptions.
+ * If an action already contains these, it has enough temporal structure for Kling.
+ */
+const HAS_TEMPORAL_LANGUAGE = /\b(then|before\s|after\s|while\s|slowly|gradually|begins?\sto|starts?\sto|eventually|finally|continues?\sto|first\s|next\s|meanwhile|picks?\sup|sets?\sdown|turns?\s(to|around|back)|steps?\s|reaches?\s(for|out)|pulls?\s|pushes?\s|opens?\s|closes?\s)\b/i;
+
+/**
+ * For shots >5 seconds where the action text is too short and lacks temporal
+ * language, adds explicit temporal sequencing. The official Kling 3.0 guide
+ * calls the action timeline the "secret sauce" — describing sequential actions
+ * as "First [A], then [B], finally [C]" enables temporal narrative control.
+ *
+ * Only enriches short actions that lack temporal language.
+ * Longer actions or those with progression words are returned unchanged.
+ */
+export function enrichActionForDuration(action: string, duration: number): string {
+  if (duration <= 5) return action;
+  if (HAS_TEMPORAL_LANGUAGE.test(action)) return action;
+
+  // Action is long enough — probably already descriptive
+  const wordCount = action.split(/\s+/).length;
+  if (wordCount >= 12) return action;
+
+  // Short action for long shot — add Kling-recommended temporal sequencing
+  if (duration >= 8) {
+    return `First, ${action.charAt(0).toLowerCase()}${action.slice(1)}. Then, the action develops and intensifies. Finally, the moment settles into stillness`;
+  }
+  // 6-7s: two-phase structure
+  return `First, ${action.charAt(0).toLowerCase()}${action.slice(1)}. Then, the moment lingers and develops`;
 }
 
 function escapeRegex(str: string): string {

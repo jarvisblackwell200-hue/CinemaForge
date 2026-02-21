@@ -27,6 +27,27 @@ export interface Script {
   scenes: ScriptScene[];
 }
 
+// ─── Scene Packs (environment consistency) ───────────────────
+
+export type ScenePackImageAngle = "wide" | "medium" | "detail" | "atmospheric";
+export type ScenePackStatus = "pending" | "generating" | "complete" | "failed";
+
+export interface ScenePackImage {
+  angle: ScenePackImageAngle;
+  prompt: string;
+  imageUrl: string | null;
+  status: "pending" | "complete" | "failed";
+}
+
+export interface ScenePack {
+  sceneIndex: number;
+  status: ScenePackStatus;
+  images: ScenePackImage[];
+  elementName: string; // "element_scene_0" — used in kling_elements
+}
+
+// ─── Script Analysis ─────────────────────────────────────────
+
 export interface ScriptAnalysis {
   synopsis: string;
   genre: string;

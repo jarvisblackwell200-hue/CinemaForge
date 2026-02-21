@@ -10,6 +10,7 @@ export const CREDIT_COSTS = {
   ASSEMBLY_EXPORT: 10,
   VOICE_LINE: 3,
   MUSIC_TRACK: 10,
+  SCENE_PACK_IMAGE: 1,
 } as const;
 
 export type CreditOperation = keyof typeof CREDIT_COSTS;

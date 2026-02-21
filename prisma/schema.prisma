@@ -99,16 +99,18 @@ model VerificationToken {
 model Movie {
   id             String      @id @default(cuid())
   userId         String
-  user           User        @relation(fields: [userId], references: [id])
+  user           User        @relation(fields: [userId], references: [id], onDelete: Cascade)
   title          String
   synopsis       String?
   genre          String?
   targetDuration Int         @default(60)
   aspectRatio    String      @default("16:9")
   status         MovieStatus @default(CONCEPT)
-  styleBible     Json?
-  script         Json?
-  conceptChat    Json?      // persisted AI Director conversation
+  styleBible            Json?
+  script                Json?
+  conceptChat           Json?      // persisted AI Director conversation
+  sceneReferenceFrames  Json?      // { "0": "url", "1": "url" } — first frame of each scene
+  scenePacks            Json?      // ScenePack[] — generated environment reference packs
   characters     Character[]
   shots          Shot[]
   timeline       Timeline?
@@ -116,6 +118,8 @@ model Movie {
   updatedAt      DateTime    @updatedAt
 
   @@index([userId])
+  @@index([userId, status])
+  @@index([status])
 }
 
 model Character {
@@ -126,6 +130,7 @@ model Character {
   role              String?
   visualDescription String   @db.Text
   referenceImages   String[]
+  generatedReferenceUrl String?  // frame from first generated appearance
   voiceProfile      Json?
   styleBibleEntry   String?  @db.Text
   klingElementId    String?
@@ -161,6 +166,7 @@ model Shot {
 
   @@index([movieId])
   @@index([movieId, order])
+  @@index([movieId, status])
 }
 
 model Take {
@@ -203,4 +209,6 @@ model CreditLedger {
 
   @@index([userId])
   @@index([userId, createdAt])
+  @@index([movieId])
+  @@index([shotId])
 }

@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 import { z } from "zod/v4";
 import { ensureUser } from "@/lib/auth";
+import { CREDIT_COSTS } from "@/lib/constants/pricing";
+import { deductCredits, refundCredits } from "@/lib/credits";
+import { FluxKontextProvider } from "@/lib/image-gen/flux-kontext";
+
+const ASPECT_RATIO_MAP: Record<string, string> = {
+  portrait_4_3: "3:4",
+  landscape_4_3: "16:9",
+  square_hd: "1:1",
+};
 
 const RequestSchema = z.object({
   prompt: z.string().min(10),
@@ -13,9 +22,11 @@ const RequestSchema = z.object({
   referenceImageUrl: z.string().url().optional(),
 });
 
+const provider = new FluxKontextProvider();
+
 export async function POST(req: Request) {
   try {
-    await ensureUser();
+    const userId = await ensureUser();
 
     const body = await req.json();
     const parsed = RequestSchema.safeParse(body);
@@ -26,15 +37,22 @@ export async function POST(req: Request) {
       );
     }
 
-    const { prompt, style, referenceImageUrl } = parsed.data;
-
-    const kieKey = process.env.KIE_API_KEY;
-    if (!kieKey) {
+    // Deduct credits atomically (guarded update + ledger in one transaction)
+    const cost = CREDIT_COSTS.REFERENCE_IMAGE;
+    const newBalance = await deductCredits({
+      userId,
+      amount: cost,
+      type: "USAGE",
+      memo: "Reference image generation",
+    });
+    if (newBalance === null) {
       return NextResponse.json(
-        { success: false, error: "KIE_API_KEY not configured" },
-        { status: 500 },
+        { success: false, error: `Insufficient credits. Need ${cost} credit.` },
+        { status: 402 },
       );
     }
+
+    const { prompt, style, referenceImageUrl } = parsed.data;
 
     const styleModifiers: Record<string, string> = {
       photorealistic:
@@ -46,88 +64,29 @@ export async function POST(req: Request) {
     };
 
     const fullPrompt = `${prompt}. ${styleModifiers[style]}`;
+    const fluxAspectRatio = ASPECT_RATIO_MAP[parsed.data.aspectRatio] ?? "16:9";
 
-    // Use kie.ai Kling 3.0 to generate a short video, then extract first frame
-    // This gives us a cinematic still consistent with the video generation model
-    const res = await fetch("https://api.kie.ai/api/v1/jobs/createTask", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${kieKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "kling-3.0/video",
-        input: {
-          prompt: fullPrompt,
-          sound: false,
-          duration: "3",
-          aspect_ratio: "16:9",
-          mode: "std",
-          multi_shots: false,
-          ...(referenceImageUrl ? { image_urls: [referenceImageUrl] } : {}),
-        },
-      }),
-    });
+    try {
+      const result = await provider.generate({
+        prompt: fullPrompt,
+        aspectRatio: fluxAspectRatio,
+        referenceImageUrl,
+      });
 
-    if (!res.ok) {
-      const text = await res.text();
-      console.error("[generate-image] kie.ai error:", text);
+      return NextResponse.json({
+        success: true,
+        data: { imageUrl: result.imageUrl, prompt: fullPrompt },
+      });
+    } catch (genError) {
+      console.error("[generate-image] Generation failed:", genError);
+      await refundCredit(userId, cost);
+      const message = genError instanceof Error ? genError.message : "Image generation failed";
+      const status = message.includes("timed out") ? 504 : 500;
       return NextResponse.json(
-        { success: false, error: "Image generation failed" },
-        { status: 500 },
+        { success: false, error: message, refunded: true },
+        { status },
       );
     }
-
-    const createResult = await res.json();
-    if (createResult.code !== 200 || !createResult.data?.taskId) {
-      return NextResponse.json(
-        { success: false, error: createResult.msg ?? "Failed to create task" },
-        { status: 500 },
-      );
-    }
-
-    // Poll for completion (short video, should be quick)
-    const taskId = createResult.data.taskId;
-    const maxPollMs = 120_000;
-    const start = Date.now();
-
-    while (Date.now() - start < maxPollMs) {
-      await new Promise((r) => setTimeout(r, 3000));
-
-      const pollRes = await fetch(
-        `https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`,
-        { headers: { Authorization: `Bearer ${kieKey}` } },
-      );
-
-      if (!pollRes.ok) continue;
-
-      const pollJson = await pollRes.json();
-      const state = pollJson.data?.state;
-
-      if (state === "success" && pollJson.data.resultJson) {
-        const result = JSON.parse(pollJson.data.resultJson);
-        const videoUrl = result.resultUrls?.[0];
-        if (videoUrl) {
-          // Return video URL — the frontend can use a frame from it as reference
-          return NextResponse.json({
-            success: true,
-            data: { imageUrl: videoUrl, prompt: fullPrompt },
-          });
-        }
-      }
-
-      if (state === "fail") {
-        return NextResponse.json(
-          { success: false, error: pollJson.data.failMsg ?? "Generation failed" },
-          { status: 500 },
-        );
-      }
-    }
-
-    return NextResponse.json(
-      { success: false, error: "Generation timed out" },
-      { status: 504 },
-    );
   } catch (error) {
     console.error("Image generation error:", error);
     return NextResponse.json(
@@ -135,4 +94,12 @@ export async function POST(req: Request) {
       { status: 500 },
     );
   }
+}
+
+async function refundCredit(userId: string, amount: number) {
+  await refundCredits({
+    userId,
+    amount,
+    memo: "Refund: reference image generation failed",
+  });
 }

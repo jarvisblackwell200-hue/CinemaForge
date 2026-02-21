@@ -16,6 +16,8 @@ import {
   Trash2,
   Pencil,
   RotateCcw,
+  RefreshCw,
+  ImageIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -38,9 +40,10 @@ import { ShotCard } from "@/components/movie/ShotCard";
 import { CameraMovementBrowser } from "@/components/movie/CameraMovementBrowser";
 import { PromptPreview } from "@/components/movie/PromptPreview";
 import { getCreditCost } from "@/lib/constants/pricing";
-import type { Script, ScriptScene, StyleBible } from "@/types/movie";
+import type { Script, ScriptScene, StyleBible, ScenePack } from "@/types/movie";
 import type { ShotSuggestion } from "@/types/shot";
 import type { CameraMovement } from "@/lib/constants/camera-movements";
+import { CAMERA_MOVEMENTS } from "@/lib/constants/camera-movements";
 
 // ─── Director Tips (rotating fun facts during generation) ───────
 
@@ -130,6 +133,7 @@ interface MovieData {
   script: Script | null;
   styleBible: StyleBible | null;
   status: string;
+  scenePacks: ScenePack[] | null;
 }
 
 interface CharacterData {
@@ -156,7 +160,7 @@ export default function StoryboardPage() {
     total: 0,
     sceneName: "",
     beatDescription: "",
-    phase: "" as "" | "analyzing" | "planning" | "saving" | "done",
+    phase: "" as "" | "analyzing" | "planning" | "saving" | "scene-refs" | "done",
   });
   const [expandedShot, setExpandedShot] = useState<number | null>(null);
   const [cameraBrowserOpen, setCameraBrowserOpen] = useState(false);
@@ -173,6 +177,7 @@ export default function StoryboardPage() {
   const [sketchError, setSketchError] = useState<string | null>(null);
   const [regenConfirmOpen, setRegenConfirmOpen] = useState(false);
   const [scaleToFitOpen, setScaleToFitOpen] = useState(false);
+  const [scenePackGenerating, setScenePackGenerating] = useState<Set<number>>(new Set());
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const genAbortRef = useRef<AbortController | null>(null);
@@ -348,6 +353,32 @@ export default function StoryboardPage() {
         if (mountedRef.current) setShots(data.data);
       } else {
         console.error("Bulk save failed:", data);
+      }
+
+      // Auto-generate scene packs for environment consistency
+      if (mountedRef.current && !abortController.signal.aborted) {
+        setGenProgress((p) => ({ ...p, phase: "scene-refs" as typeof p.phase, beatDescription: "" }));
+        try {
+          const packRes = await fetch("/api/scene-packs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ movieId: params.movieId }),
+            signal: abortController.signal,
+          });
+          if (packRes.ok) {
+            // Refresh movie data to get scenePacks
+            const movieRes = await fetch(`/api/movies/${params.movieId}`);
+            if (movieRes.ok) {
+              const movieData = await movieRes.json();
+              if (movieData.success && mountedRef.current) {
+                setMovie(movieData.data);
+              }
+            }
+          }
+        } catch (err) {
+          if (err instanceof DOMException && err.name === "AbortError") return;
+          console.warn("[storyboard] Scene pack generation failed — continuing without:", err);
+        }
       }
 
       if (mountedRef.current) {
@@ -712,6 +743,75 @@ export default function StoryboardPage() {
     }
   }
 
+  // ─── Scene pack regeneration ─────────────────────────────────
+
+  async function regenerateScenePack(sceneIndex: number) {
+    setScenePackGenerating((prev) => new Set(prev).add(sceneIndex));
+    try {
+      // Delete existing pack
+      await fetch("/api/scene-packs", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ movieId: params.movieId, sceneIndex }),
+      });
+
+      // Generate new pack
+      const res = await fetch("/api/scene-packs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ movieId: params.movieId, sceneIndex }),
+      });
+
+      if (res.ok) {
+        // Refresh movie to get updated packs
+        const movieRes = await fetch(`/api/movies/${params.movieId}`);
+        if (movieRes.ok) {
+          const movieData = await movieRes.json();
+          if (movieData.success && mountedRef.current) {
+            setMovie(movieData.data);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[storyboard] Scene pack regeneration failed:", err);
+    } finally {
+      setScenePackGenerating((prev) => {
+        const next = new Set(prev);
+        next.delete(sceneIndex);
+        return next;
+      });
+    }
+  }
+
+  async function generateScenePackForScene(sceneIndex: number) {
+    setScenePackGenerating((prev) => new Set(prev).add(sceneIndex));
+    try {
+      const res = await fetch("/api/scene-packs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ movieId: params.movieId, sceneIndex }),
+      });
+
+      if (res.ok) {
+        const movieRes = await fetch(`/api/movies/${params.movieId}`);
+        if (movieRes.ok) {
+          const movieData = await movieRes.json();
+          if (movieData.success && mountedRef.current) {
+            setMovie(movieData.data);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[storyboard] Scene pack generation failed:", err);
+    } finally {
+      setScenePackGenerating((prev) => {
+        const next = new Set(prev);
+        next.delete(sceneIndex);
+        return next;
+      });
+    }
+  }
+
   // ─── Proceed to Generate ───────────────────────────────────
 
   async function handleContinue() {
@@ -951,6 +1051,7 @@ export default function StoryboardPage() {
                 {genProgress.phase === "analyzing" && "Analyzing your script..."}
                 {genProgress.phase === "planning" && "Planning shots..."}
                 {genProgress.phase === "saving" && "Saving shot plan..."}
+                {genProgress.phase === "scene-refs" && "Generating scene references..."}
                 {genProgress.phase === "done" && "Shot plan ready!"}
               </h2>
               {genProgress.sceneName && genProgress.phase === "planning" && (
@@ -967,7 +1068,7 @@ export default function StoryboardPage() {
                   <div
                     className="h-full rounded-full bg-primary transition-all duration-500 ease-out"
                     style={{
-                      width: `${genProgress.phase === "done" ? 100 : genProgress.phase === "saving" ? 95 : (genProgress.current / genProgress.total) * 90}%`,
+                      width: `${genProgress.phase === "done" ? 100 : genProgress.phase === "scene-refs" ? 97 : genProgress.phase === "saving" ? 90 : (genProgress.current / genProgress.total) * 85}%`,
                     }}
                   />
                 </div>
@@ -975,17 +1076,21 @@ export default function StoryboardPage() {
                   <span>
                     {genProgress.phase === "done"
                       ? "Complete!"
-                      : genProgress.phase === "saving"
-                        ? "Saving to database..."
-                        : `Beat ${genProgress.current} of ${genProgress.total}`}
+                      : genProgress.phase === "scene-refs"
+                        ? "Generating scene references..."
+                        : genProgress.phase === "saving"
+                          ? "Saving to database..."
+                          : `Beat ${genProgress.current} of ${genProgress.total}`}
                   </span>
                   <span>
                     {genProgress.phase === "done"
                       ? "100%"
                       : `${Math.round(
-                          genProgress.phase === "saving"
-                            ? 95
-                            : (genProgress.current / genProgress.total) * 90
+                          genProgress.phase === "scene-refs"
+                            ? 97
+                            : genProgress.phase === "saving"
+                              ? 90
+                              : (genProgress.current / genProgress.total) * 85
                         )}%`}
                   </span>
                 </div>
@@ -1051,6 +1156,83 @@ export default function StoryboardPage() {
                     </Badge>
                   </div>
                 </div>
+
+                {/* Scene pack thumbnails */}
+                {(() => {
+                  const scenePack = movie?.scenePacks?.find(
+                    (sp) => sp.sceneIndex === sceneIndex
+                  );
+                  const isGenerating = scenePackGenerating.has(sceneIndex);
+
+                  if (isGenerating) {
+                    return (
+                      <div className="flex items-center gap-2 px-1 pb-2">
+                        <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                        <span className="text-[10px] text-muted-foreground">
+                          Generating scene references...
+                        </span>
+                      </div>
+                    );
+                  }
+
+                  if (scenePack?.status === "complete") {
+                    return (
+                      <div className="flex items-center gap-2 px-1 pb-2">
+                        {scenePack.images
+                          .filter((img) => img.status === "complete" && img.imageUrl)
+                          .map((img) => (
+                            <div
+                              key={img.angle}
+                              className="relative h-14 w-22 overflow-hidden rounded border border-border/50"
+                            >
+                              <img
+                                src={img.imageUrl!}
+                                alt={`${img.angle} reference`}
+                                className="h-full w-full object-cover"
+                              />
+                              <span className="absolute bottom-0 left-0 right-0 bg-black/60 py-0.5 text-center text-[9px] text-white/80">
+                                {img.angle}
+                              </span>
+                            </div>
+                          ))}
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 w-7 p-0 text-muted-foreground hover:text-foreground"
+                              onClick={() => regenerateScenePack(sceneIndex)}
+                            >
+                              <RefreshCw className="h-3 w-3" />
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent className="text-xs">
+                            Regenerate scene reference images
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
+                    );
+                  }
+
+                  // No pack — show generate button
+                  if (shots.some((s) => s.sceneIndex === sceneIndex)) {
+                    return (
+                      <div className="px-1 pb-2">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-[10px] text-muted-foreground hover:text-foreground"
+                          onClick={() => generateScenePackForScene(sceneIndex)}
+                        >
+                          <ImageIcon className="mr-1 h-3 w-3" />
+                          Generate Scene Refs
+                        </Button>
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })()}
 
                 {/* Shots for this scene */}
                 <div className="space-y-2">
@@ -1245,7 +1427,9 @@ export default function StoryboardPage() {
         onSelect={handleCameraSelect}
         currentMovementId={
           cameraBrowserTarget !== null
-            ? shots[cameraBrowserTarget]?.cameraMovement
+            ? CAMERA_MOVEMENTS.find(
+                (m) => m.promptSyntax === shots[cameraBrowserTarget]?.cameraMovement
+              )?.id
             : undefined
         }
       />
