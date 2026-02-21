@@ -117,15 +117,25 @@ export async function generateScenePack(
     elementName,
   };
 
-  // Generate images sequentially (Flux is fast, ~5-10s per image)
+  // Generate images sequentially (Flux is fast, ~5-10s per image).
+  // The first image (wide establishing) is used as a reference for subsequent
+  // angles so all images share the same visual identity (colors, materials, architecture).
+  let anchorImageUrl: string | undefined;
+
   for (const image of pack.images) {
     try {
       const result = await imgProvider.generate({
         prompt: image.prompt,
         aspectRatio: input.aspectRatio,
+        referenceImageUrl: anchorImageUrl,
       });
       image.imageUrl = result.imageUrl;
       image.status = "complete";
+
+      // First successful image becomes the visual anchor for the rest
+      if (!anchorImageUrl) {
+        anchorImageUrl = result.imageUrl;
+      }
     } catch (err) {
       console.error(
         `[scene-pack] Failed to generate ${image.angle} for scene ${input.sceneIndex}:`,
